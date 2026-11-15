@@ -6,7 +6,12 @@ const DEFAULTS = {
   systemPrompt: '你是一位擅长角色扮演与同人创作的小说作者。尊重提供的人物设定、关系、世界观和时间线。',
   creativeRules: '本次内容是独立番外，不是主线已经发生的事实。不要修改、总结或声称写入主线记忆。保持角色言行符合设定。',
   jailbreakPrompt: '',
+  customPrompt: '',
   generationMode: 'quiet',
+  apiChoice: 'primary',
+  secondaryApi: { baseUrl:'', apiKey:'', model:'', temperature:null, maxTokens:null },
+  localPresets: [],
+  activeLocalPresetId: null,
   scripts: [],
   storyLibrary: [],
   regexRules: [],
@@ -143,6 +148,8 @@ function ensureUI(){
         </section>
         <section id="sst-page-beautify" class="sst-page" hidden>
           <div class="sst-library-head"><strong>输出正则美化规则</strong><button id="sst-add-regex">＋ 添加规则</button></div>
+          <div class="sst-button-row"><button id="sst-scan-regex">扫描酒馆全局 / 当前聊天正则</button><button id="sst-import-regex">导入正则 JSON</button><input id="sst-regex-file" type="file" accept=".json,application/json" hidden></div>
+          <p class="sst-note">扫描结果会复制到异想剧场的独立规则列表，按来源标记全局或当前聊天。编辑和启用状态不会反向修改酒馆原正则。</p>
           <p class="sst-note">规则只处理剧场显示与归档的输出，不修改主线聊天。请谨慎使用复杂正则，避免灾难性回溯。</p>
           <div id="sst-regex-list"></div>
           <div id="sst-regex-editor" class="sst-editor" hidden>
@@ -166,6 +173,10 @@ function ensureUI(){
               <option value="quiet">沿用酒馆提示词预设（Quiet）</option>
               <option value="raw">独立 Raw（不套用 Prompt Manager）</option>
             </select>
+            <select id="sst-api-choice" aria-label="模型接口">
+              <option value="primary">主 API · 酒馆当前模型</option>
+              <option value="secondary">副 API · 备用模型</option>
+            </select>
             <button id="sst-generate" class="sst-generate">生成剧场 ✦</button>
           </div>
         </div>
@@ -173,7 +184,24 @@ function ensureUI(){
           <div class="sst-settings-head"><strong>剧场设置</strong><button id="sst-settings-close" class="sst-icon-btn">✕</button></div>
           <label>系统提示词<textarea id="sst-system" rows="3"></textarea></label>
           <label>创作规则<textarea id="sst-rules" rows="3"></textarea></label>
-          <label>自定义创作 / 破限提示词<textarea id="sst-jailbreak" rows="3" placeholder="写入你希望模型遵循的创作要求"></textarea></label>
+          <label>自定义创作提示词<textarea id="sst-custom-prompt" rows="3" placeholder="例如：整体风格偏吐槽、节奏轻快，多写角色之间的互怼。仅作用于异想剧场，不必改动酒馆预设。"></textarea></label>
+          <label>额外创作 / 破限提示词<textarea id="sst-jailbreak" rows="3" placeholder="可选：补充创作边界、文风或角色表现要求"></textarea></label>
+          <div class="sst-preset-info">
+            <strong>异想剧场预设副本</strong>
+            <p>导入酒馆导出的 Prompt Manager 预设 JSON 后，会在这里保存一份独立副本。你可以编辑副本中的提示词条目、启用/停用并应用到番外；不会覆盖酒馆原预设。</p>
+            <div class="sst-button-row"><button id="sst-import-preset">导入预设 JSON</button><button id="sst-save-preset">将当前配置另存为预设</button><input id="sst-preset-file" type="file" accept=".json,application/json" hidden></div>
+            <div id="sst-preset-list"></div>
+          </div>
+          <div class="sst-preset-info">
+            <strong>副 API（可选）</strong>
+            <p>主 API 直接沿用酒馆当前连接；副 API 使用独立的 OpenAI 兼容 Chat Completions 接口。API Key 仅保存在本机酒馆扩展设置中，请勿导出或分享设置文件。</p>
+            <label>接口基础 URL<input id="sst-secondary-url" type="url" placeholder="https://example.com/v1"></label>
+            <label>API Key<input id="sst-secondary-key" type="password" autocomplete="off" placeholder="副 API 密钥"></label>
+            <label>模型名称<input id="sst-secondary-model" placeholder="model-name"></label>
+            <label>温度<input id="sst-secondary-temperature" type="number" min="0" max="2" step="0.05" placeholder="留空使用模型默认值"></label>
+            <label>最大输出 Token<input id="sst-secondary-max-tokens" type="number" min="1" step="1" placeholder="留空使用模型默认值"></label>
+            <button id="sst-save-secondary">保存副 API</button>
+          </div>
           <div class="sst-preset-info">
             <strong>酒馆原生提示词预设</strong>
             <p>这里不再创建假冒的酒馆预设。Chat Completion 使用 AI Response Configuration 中的 Prompt Manager；Text Completion 使用 Advanced Formatting。选择 Quiet 模式时，生成请求会经过酒馆当前配置；Raw 模式则只使用本剧场自行组装的提示词。</p>
@@ -268,12 +296,27 @@ function showPage(page){
 function bindSettings(){
   const s=settings();
   const set=(id,key,parse=v=>v)=>{$(id).addEventListener('change',e=>{s[key]=parse(e.target.type==='checkbox'?e.target.checked:e.target.value);save();});};
-  set('#sst-system','systemPrompt');set('#sst-rules','creativeRules');set('#sst-jailbreak','jailbreakPrompt');
+  set('#sst-system','systemPrompt');set('#sst-rules','creativeRules');set('#sst-jailbreak','jailbreakPrompt');set('#sst-custom-prompt','customPrompt');
   set('#sst-capture-character','captureCharacter',Boolean);set('#sst-capture-persona','capturePersona',Boolean);
   set('#sst-capture-chat','captureChat',Boolean);set('#sst-capture-lore','captureEmbeddedLore',Boolean);
   set('#sst-max-history','maxHistory',v=>Math.max(1,Math.min(200,Number(v)||30)));
   $('#sst-generation-mode').value=s.generationMode||'quiet';
   $('#sst-generation-mode').addEventListener('change',e=>{s.generationMode=e.target.value;save();});
+  $('#sst-api-choice').value=s.apiChoice||'primary';
+  $('#sst-api-choice').addEventListener('change',e=>{s.apiChoice=e.target.value;save();});
+  $('#sst-secondary-url').value=s.secondaryApi?.baseUrl||'';
+  $('#sst-secondary-key').value=s.secondaryApi?.apiKey||'';
+  $('#sst-secondary-model').value=s.secondaryApi?.model||'';
+  $('#sst-secondary-temperature').value=s.secondaryApi?.temperature??'';
+  $('#sst-secondary-max-tokens').value=s.secondaryApi?.maxTokens??'';
+  $('#sst-save-secondary').addEventListener('click',()=>{
+    s.secondaryApi={baseUrl:$('#sst-secondary-url').value.trim().replace(/\/$/,''),apiKey:$('#sst-secondary-key').value.trim(),model:$('#sst-secondary-model').value.trim(),temperature:$('#sst-secondary-temperature').value===''?null:Number($('#sst-secondary-temperature').value),maxTokens:$('#sst-secondary-max-tokens').value===''?null:Number($('#sst-secondary-max-tokens').value)};
+    save();toast('副 API 配置已保存');
+  });
+  $('#sst-import-preset').addEventListener('click',()=>$('#sst-preset-file').click());
+  $('#sst-preset-file').addEventListener('change',importLocalPreset);
+  $('#sst-save-preset').addEventListener('click',saveLocalPreset);
+  renderLocalPresets();
   $('#sst-lore').addEventListener('change',e=>{const t=getTheater(s);t.loreSupplement=e.target.value;save();});
   $('#sst-refresh-context').addEventListener('click',()=>{const t=getTheater(s);t.snapshot=makeSnapshot(s);save();render();$('#sst-settings').hidden=false;toast('主线背景快照已刷新');});
   $('#sst-rename').addEventListener('click',()=>{const t=getTheater(s),n=prompt('剧场名称',t.title);if(n){t.title=n;save();render();$('#sst-settings').hidden=false;}});
@@ -299,6 +342,9 @@ function bindLibrary(){
   });
   $('#sst-archive-search').addEventListener('input',renderArchive);
   $('#sst-add-regex').addEventListener('click',()=>openRegexEditor());
+  $('#sst-scan-regex').addEventListener('click',scanTavernRegex);
+  $('#sst-import-regex').addEventListener('click',()=>$('#sst-regex-file').click());
+  $('#sst-regex-file').addEventListener('change',importRegexFile);
   $('#sst-cancel-regex').addEventListener('click',()=>$('#sst-regex-editor').hidden=true);
   $('#sst-save-regex').addEventListener('click',()=>{
     const s=settings(),rule={id:$('#sst-regex-editor').dataset.id||uuid(),name:$('#sst-regex-name').value.trim()||'未命名规则',
@@ -349,11 +395,84 @@ function previewRegex(){
 }
 function renderRegexRules(){
   const s=settings(),el=$('#sst-regex-list');
-  el.innerHTML=s.regexRules.length?s.regexRules.map(r=>`<article class="sst-library-card"><label class="sst-inline-check"><input type="checkbox" data-regex-toggle="${esc(r.id)}" ${r.enabled?'checked':''}> ${esc(r.name)}</label><small>/${esc(r.pattern)}/${r.global?'g':''}${r.insensitive?'i':''} → ${esc(r.replace)}</small><div class="sst-button-row"><button data-edit-regex="${esc(r.id)}">编辑</button><button data-delete-regex="${esc(r.id)}">删除</button></div></article>`).join(''):'<div class="sst-empty-small">还没有美化规则。</div>';
+  el.innerHTML=s.regexRules.length?s.regexRules.map(r=>`<article class="sst-library-card"><label class="sst-inline-check"><input type="checkbox" data-regex-toggle="${esc(r.id)}" ${r.enabled?'checked':''}> ${esc(r.name)}</label><small>${esc(r.source||'异想剧场自定义')} · /${esc(r.pattern)}/${r.global?'g':''}${r.insensitive?'i':''} → ${esc(r.replace)}</small><div class="sst-button-row"><button data-edit-regex="${esc(r.id)}">编辑</button><button data-delete-regex="${esc(r.id)}">删除</button></div></article>`).join(''):'<div class="sst-empty-small">还没有美化规则。</div>';
   el.querySelectorAll('[data-regex-toggle]').forEach(b=>b.addEventListener('change',()=>{const r=s.regexRules.find(x=>x.id===b.dataset.regexToggle);if(r){r.enabled=b.checked;save();}}));
   el.querySelectorAll('[data-edit-regex]').forEach(b=>b.addEventListener('click',()=>openRegexEditor(s.regexRules.find(x=>x.id===b.dataset.editRegex))));
   el.querySelectorAll('[data-delete-regex]').forEach(b=>b.addEventListener('click',()=>{s.regexRules=s.regexRules.filter(x=>x.id!==b.dataset.deleteRegex);save();renderRegexRules();}));
 }
+
+function activePresetPrompt(s){
+  const preset=(s.localPresets||[]).find(x=>x.id===s.activeLocalPresetId);
+  if(!preset)return '';
+  return (preset.prompts||[]).filter(x=>x.enabled!==false && x.content).map(x=>`【导入预设：${x.name||'Prompt'}】\n${x.content}`).join('\n\n');
+}
+function renderLocalPresets(){
+  const el=$('#sst-preset-list');if(!el)return;const s=settings();
+  el.innerHTML=(s.localPresets||[]).map(p=>`<article class="sst-library-card"><label class="sst-inline-check"><input type="radio" name="sst-active-preset" data-activate-preset="${esc(p.id)}" ${s.activeLocalPresetId===p.id?'checked':''}> ${esc(p.name)}</label><small>${(p.prompts||[]).length} 个提示词条目 · 独立副本</small><div class="sst-button-row"><button data-edit-preset="${esc(p.id)}">编辑条目</button><button data-delete-preset="${esc(p.id)}">删除</button></div></article>`).join('')||'<small>尚未导入预设副本。</small>';
+  el.querySelectorAll('[data-activate-preset]').forEach(b=>b.addEventListener('change',()=>{s.activeLocalPresetId=b.dataset.activatePreset;save();toast('番外预设副本已启用');}));
+  el.querySelectorAll('[data-delete-preset]').forEach(b=>b.addEventListener('click',()=>{if(confirm('删除这份异想剧场预设副本？酒馆原预设不会受影响。')){s.localPresets=s.localPresets.filter(x=>x.id!==b.dataset.deletePreset);if(s.activeLocalPresetId===b.dataset.deletePreset)s.activeLocalPresetId=null;save();renderLocalPresets();}}));
+  el.querySelectorAll('[data-edit-preset]').forEach(b=>b.addEventListener('click',()=>editLocalPreset(s.localPresets.find(x=>x.id===b.dataset.editPreset))));
+}
+function extractPresetPrompts(data){
+  const arr=Array.isArray(data?.prompts)?data.prompts:Array.isArray(data?.entries)?data.entries:[];
+  return arr.map((p,i)=>({id:String(p.identifier||p.id||i),name:p.name||p.identifier||`提示词 ${i+1}`,role:p.role||'system',content:String(p.content??p.prompt??p.text??''),enabled:p.enabled!==false && p.injection_position!==-1})).filter(x=>x.content.trim());
+}
+async function importLocalPreset(e){
+  const f=e.target.files?.[0];if(!f)return;
+  try{const data=JSON.parse(await f.text());const prompts=extractPresetPrompts(data);if(!prompts.length)throw new Error('没有识别到 prompts/entries 提示词条目。');
+    const s=settings(),p={id:uuid(),name:data.name||f.name.replace(/\.json$/i,''),prompts,source:'import',createdAt:Date.now()};s.localPresets.push(p);s.activeLocalPresetId=p.id;const embedded=data.extensions?.regex_scripts||data.regex_scripts||[];if(Array.isArray(embedded))embedded.forEach((r,i)=>{const rule=normalizeRegexRule(r,'预设内嵌正则',i);if(rule)s.regexRules.push(rule);});save();renderLocalPresets();toast(`已导入 ${prompts.length} 个提示词条目副本`);
+  }catch(err){alert('预设导入失败：'+err.message+'。请使用酒馆导出的 Chat Completion Prompt Manager 预设 JSON。');}finally{e.target.value='';}
+}
+function saveLocalPreset(){
+  const s=settings(),name=prompt('给当前异想剧场配置起个名字');if(!name)return;
+  const prompts=[{id:'custom',name:'自定义创作提示词',role:'system',content:s.customPrompt||'',enabled:true},{id:'rules',name:'创作规则',role:'system',content:s.creativeRules||'',enabled:true},{id:'jailbreak',name:'额外创作提示词',role:'system',content:s.jailbreakPrompt||'',enabled:!!s.jailbreakPrompt}].filter(x=>x.content);
+  const p={id:uuid(),name,prompts,source:'local',createdAt:Date.now()};s.localPresets.push(p);s.activeLocalPresetId=p.id;save();renderLocalPresets();
+}
+function editLocalPreset(p){
+  if(!p)return;for(const item of p.prompts||[]){const enabled=confirm(`条目：${item.name}\n当前：${item.enabled===false?'停用':'启用'}\n点击“确定”保持/设为启用，点击“取消”停用。`);item.enabled=enabled;
+    const content=prompt(`编辑提示词内容：${item.name}`,item.content);if(content!==null)item.content=content;}
+  save();renderLocalPresets();
+}
+async function callSecondaryApi(s,system,prompt){
+  const a=s.secondaryApi||{};if(!a.baseUrl||!a.model)throw new Error('请先填写副 API 的基础 URL 和模型名称。');
+  const url=a.baseUrl.replace(/\/$/,'')+'/chat/completions';
+  const body={model:a.model,messages:[...(system?[{role:'system',content:system}]:[]),{role:'user',content:prompt}],stream:false};
+  if(a.temperature!==null&&a.temperature!==undefined)body.temperature=a.temperature;
+  if(a.maxTokens)body.max_tokens=a.maxTokens;
+  const headers={'Content-Type':'application/json'};if(a.apiKey)headers.Authorization='Bearer '+a.apiKey;
+  const response=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
+  if(!response.ok)throw new Error(`副 API 请求失败（HTTP ${response.status}）：${(await response.text()).slice(0,500)}`);
+  const data=await response.json();const content=data?.choices?.[0]?.message?.content;
+  if(typeof content==='string')return content;
+  if(Array.isArray(content))return content.map(x=>x.text||'').join('');
+  throw new Error('副 API 返回格式不是兼容 OpenAI 的 choices[0].message.content。');
+}
+function normalizeRegexRule(r,source,index){
+  const pattern=r.findRegex??r.pattern??r.regex??r.find??'';if(!pattern)return null;
+  let raw=String(pattern),flags='';const m=raw.match(/^\/(.*)\/([gimsuy]*)$/);if(m){raw=m[1];flags=m[2];}
+  return {id:uuid(),name:r.scriptName||r.name||`酒馆正则 ${index+1}`,pattern:raw,replace:String(r.replaceString??r.replace??r.replacement??''),global:flags.includes('g')||r.markdownOnly===false||r.global===true,insensitive:flags.includes('i'),enabled:r.disabled!==true&&r.enabled!==false,source};
+}
+function collectRegexArrays(root,source,out,seen=new Set(),depth=0){
+  if(!root||typeof root!=='object'||depth>6||seen.has(root))return;seen.add(root);
+  if(Array.isArray(root)){if(root.some(x=>x&&typeof x==='object'&&('findRegex'in x||'pattern'in x||'regex'in x)))root.forEach((x,i)=>{const n=normalizeRegexRule(x,source,i);if(n)out.push(n);});else root.forEach(x=>collectRegexArrays(x,source,out,seen,depth+1));return;}
+  for(const [k,v] of Object.entries(root)){if(/regex/i.test(k))collectRegexArrays(v,source,out,seen,depth+1);}
+}
+function scanTavernRegex(){
+  const c=ctx(),out=[];const globalCandidates=[window.extension_settings?.regex,window.extension_settings?.regex_scripts,c?.extensionSettings?.regex,c?.extensionSettings?.regex_scripts,window.power_user?.regex_scripts];
+  globalCandidates.forEach(x=>collectRegexArrays(x,'酒馆全局',out));
+  const localCandidates=[c?.chatMetadata?.regex_scripts,c?.chatMetadata?.extensions?.regex_scripts,c?.chatMetadata?.regex,c?.chatMetadata?.extensions?.regex];
+  localCandidates.forEach(x=>collectRegexArrays(x,'当前聊天',out));
+  const s=settings(),known=new Set(s.regexRules.map(x=>x.name+'|'+x.pattern+'|'+x.source));let added=0;
+  out.forEach(x=>{const k=x.name+'|'+x.pattern+'|'+x.source;if(!known.has(k)){s.regexRules.push(x);known.add(k);added++;}});
+  save();renderRegexRules();toast(added?`扫描完成，复制 ${added} 条规则；未改动酒馆原规则。`:'没有发现新的可识别正则。可导出酒馆正则 JSON 后手动导入。');
+}
+async function importRegexFile(e){
+  const f=e.target.files?.[0];if(!f)return;
+  try{const data=JSON.parse(await f.text()),list=Array.isArray(data)?data:(data.regex_scripts||data.scripts||data.regexScripts||[]);if(!Array.isArray(list))throw new Error('文件中没有识别到正则数组');
+    const s=settings();list.forEach((r,i)=>{const n=normalizeRegexRule(r,'导入文件',i);if(n)s.regexRules.push(n);});save();renderRegexRules();toast('正则规则已复制到异想剧场');
+  }catch(err){alert('正则导入失败：'+err.message);}finally{e.target.value='';}
+}
+
 function toast(message){
   if(window.toastr?.info) window.toastr.info(message);
   else console.info('[Side Story]',message);
@@ -369,7 +488,8 @@ function render(){
   $('#sst-messages').innerHTML=t.messages.length?t.messages.map(m=>`<article class="sst-msg ${m.role}"><div class="sst-role">${m.role==='user'?'你':'剧场'}</div><div class="sst-text">${esc(m.content).replace(/\n/g,'<br>')}</div></article>`).join(''):'<div class="sst-empty"><div>🌙</div><strong>这里是主线之外的小小宇宙</strong><span>写下一个脑洞，开启独立番外。</span></div>';
   $('#sst-messages').scrollTop=$('#sst-messages').scrollHeight;
   $('#sst-generation-mode').value=s.generationMode||'quiet';
-  $('#sst-system').value=s.systemPrompt;$('#sst-rules').value=s.creativeRules;$('#sst-jailbreak').value=s.jailbreakPrompt;
+  $('#sst-api-choice').value=s.apiChoice||'primary';
+  $('#sst-system').value=s.systemPrompt;$('#sst-rules').value=s.creativeRules;$('#sst-jailbreak').value=s.jailbreakPrompt;$('#sst-custom-prompt').value=s.customPrompt||'';
   $('#sst-lore').value=t.loreSupplement||'';
   $('#sst-capture-character').checked=s.captureCharacter;$('#sst-capture-persona').checked=s.capturePersona;
   $('#sst-capture-chat').checked=s.captureChat;$('#sst-capture-lore').checked=s.captureEmbeddedLore;
@@ -383,7 +503,7 @@ async function generate(){
   try{
     if(!t.snapshot)t.snapshot=makeSnapshot(s);
     const previous=t.messages.slice(-s.maxTheaterTurns).map(m=>`${m.role==='user'?'用户':'剧场'}：${m.content}`).join('\n\n');
-    const system=[s.systemPrompt,s.creativeRules,s.jailbreakPrompt].filter(Boolean).join('\n\n');
+    const system=[s.systemPrompt,s.creativeRules,s.customPrompt,s.jailbreakPrompt,activePresetPrompt(s)].filter(Boolean).join('\n\n');
     const prompt=[
       '【独立番外背景快照】\n'+(t.snapshot.text||'未提供主线背景'),
       '【本剧场补充世界书与设定】\n'+(t.loreSupplement||'无'),
@@ -392,9 +512,10 @@ async function generate(){
       '请只在本番外空间内延续，不要声称这些事件已经发生在主线。'
     ].join('\n\n');
     let result;
-    if(mode==='quiet'){
+    if((s.apiChoice||'primary')==='secondary'){
+      result=await callSecondaryApi(s,system,prompt);
+    }else if(mode==='quiet'){
       if(typeof c.generateQuietPrompt!=='function')throw new Error('当前酒馆未提供 generateQuietPrompt()。');
-      // Quiet uses the active ST prompt preset and chat context, but its result is not appended to chat.
       result=await c.generateQuietPrompt({quietPrompt:[system,prompt].filter(Boolean).join('\n\n')});
     }else{
       if(typeof c.generateRaw!=='function')throw new Error('当前酒馆未提供 generateRaw()。');
@@ -409,12 +530,12 @@ async function generate(){
   finally{button.disabled=false;button.textContent='生成剧场 ✦';}
 }
 function exportData(){
-  const s=settings(),blob=new Blob([JSON.stringify({version:'0.4.0',theaters:s.theaters,scripts:s.scripts,storyLibrary:s.storyLibrary,regexRules:s.regexRules},null,2)],{type:'application/json'});
+  const s=settings(),blob=new Blob([JSON.stringify({version:'0.5.0',theaters:s.theaters,scripts:s.scripts,storyLibrary:s.storyLibrary,regexRules:s.regexRules,localPresets:s.localPresets,customPrompt:s.customPrompt,apiChoice:s.apiChoice},null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='side-story-backup.json';a.click();URL.revokeObjectURL(a.href);
 }
 async function importData(e){
   const f=e.target.files?.[0];if(!f)return;
-  try{const data=JSON.parse(await f.text()),s=settings();if(Array.isArray(data.theaters))s.theaters=data.theaters;if(Array.isArray(data.scripts))s.scripts=data.scripts;if(Array.isArray(data.storyLibrary))s.storyLibrary=data.storyLibrary;if(Array.isArray(data.regexRules))s.regexRules=data.regexRules;s.activeId=null;save();render();toast('剧场数据导入成功');}
+  try{const data=JSON.parse(await f.text()),s=settings();if(Array.isArray(data.theaters))s.theaters=data.theaters;if(Array.isArray(data.scripts))s.scripts=data.scripts;if(Array.isArray(data.storyLibrary))s.storyLibrary=data.storyLibrary;if(Array.isArray(data.regexRules))s.regexRules=data.regexRules;if(Array.isArray(data.localPresets))s.localPresets=data.localPresets;if(typeof data.customPrompt==='string')s.customPrompt=data.customPrompt;s.activeId=null;save();render();toast('剧场数据导入成功');}
   catch(err){alert('导入失败：文件格式不正确。');}
   e.target.value='';
 }

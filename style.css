@@ -92,3 +92,6 @@ body.sst-lock-scroll{overflow:hidden!important}
 #sst-overlay .sst-preset-info p{font-size:11px;line-height:1.6;color:#c0b4ca;margin:6px 0 0}
 #sst-overlay #sst-generation-mode{flex:1;min-width:0;background:#ffffff0d;border:1px solid #ffffff20;border-radius:10px;padding:9px;font-size:11px}
 #sst-toolbar-open{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer}
+#sst-overlay #sst-api-choice{flex:1;min-width:0;background:#ffffff0d;border:1px solid #ffffff20;border-radius:10px;padding:9px;font-size:11px;color:inherit}
+#sst-overlay .sst-settings input:not([type=checkbox]):not([type=radio]):not([type=file]){width:100%;border:1px solid #ffffff22;background:#ffffff0b;border-radius:10px;padding:10px;font-size:13px;color:inherit}
+#sst-overlay #sst-preset-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}

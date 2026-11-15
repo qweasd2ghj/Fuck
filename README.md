@@ -54,3 +54,13 @@ git clone https://github.com/qweasd2ghj/fuck.git side-story
 ## 开发状态
 
 这是开发预览版本，尚未在所有 Android + Termux + 第三方 API 中转组合上完成实机测试。Quiet 模式的提示词来源依赖酒馆当前所选 API 预设及其 Quiet 触发配置。提交 Issue 时请附上 SillyTavern 版本、浏览器、API 类型和控制台报错，并移除密钥及私人内容。
+
+
+## v0.5.0 新增能力
+
+- **Quiet 自定义提示词**：异想剧场独立追加吐槽风格、叙事视角等要求，不必编辑酒馆主预设。
+- **预设副本**：可导入酒馆导出的 Chat Completion Prompt Manager JSON，保存为异想剧场副本；支持启用、逐条编辑/停用、删除。不会写回或覆盖酒馆原预设。导入副本中的提示词会以附加指令方式注入番外请求；目前不完整复刻 Prompt Manager 的原始 role、trigger、depth 和排序语义。
+- **正则复制**：尝试从酒馆可访问的全局与当前聊天设置扫描规则；若某版本/扩展未暴露数据，可导入酒馆导出的正则 JSON。复制后的规则独立编辑，不反向改动酒馆。
+- **双 API**：主 API 使用酒馆当前连接；副 API 支持 OpenAI 兼容的 `/chat/completions`。副 API 的地址、模型和可选参数独立配置。
+
+**安全提醒**：副 API Key 保存在本机 SillyTavern 扩展设置中（不是加密保险箱）；请勿公开分享含密钥的设置文件。异想剧场的数据备份不会导出副 API Key。
