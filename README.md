@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-**v0.3.0 — Mobile Overlay Preview**
+**v0.4.0 — Mobile Theater Library & Preset Modes**
 
 ### 功能
 - 全屏覆盖式剧场窗口（Overlay）
@@ -39,7 +39,7 @@ git clone https://github.com/qweasd2ghj/fuck.git side-story
 - 番外生成结果写入扩展自己的设置数据，不会追加到 `context.chat`。
 - 生成时使用已保存的主线背景快照、本剧场历史和本轮输入，不自动携带实时主线聊天上下文。
 - 创建剧场时会建立背景快照；需要同步新剧情时，可在设置中手动刷新。
-- 当前版本可读取角色卡内嵌 Character Book；尚未实现对全局/角色绑定世界书全部激活条目的可靠自动提取，可在补充世界书栏手动粘贴。
+- Quiet 模式可沿用酒馆当前聊天上下文和激活世界书；Raw 模式仍需通过角色卡快照和补充世界书栏提供设定。
 - 本版沿用酒馆当前 API 预设，不对第三方中转强行覆盖未验证的高级参数。
 - 群聊角色聚合、流式输出和更多生成参数适配仍待开发。
 
@@ -53,4 +53,4 @@ git clone https://github.com/qweasd2ghj/fuck.git side-story
 
 ## 开发状态
 
-这是开发预览版本，尚未在所有 Android + Termux + 第三方 API 中转组合上完成实机测试。提交 Issue 时请附上 SillyTavern 版本、浏览器、API 类型和控制台报错，并移除密钥及私人内容。
+这是开发预览版本，尚未在所有 Android + Termux + 第三方 API 中转组合上完成实机测试。Quiet 模式的提示词来源依赖酒馆当前所选 API 预设及其 Quiet 触发配置。提交 Issue 时请附上 SillyTavern 版本、浏览器、API 类型和控制台报错，并移除密钥及私人内容。
