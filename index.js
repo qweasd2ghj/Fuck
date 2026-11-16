@@ -2,7 +2,7 @@
 'use strict';
 
 const KEY = 'side_story_theater';
-const VERSION = '0.6.5';
+const VERSION = '0.6.6';
 let secondaryKeySession = '';
 let nativePresetRows = [];
 let presetSearch = '';
@@ -14,7 +14,7 @@ const DEFAULTS = {
   creativeRules: '本次内容是独立番外，不是主线已经发生的事实。不要修改、总结或声称写入主线记忆。保持角色言行符合设定。',
   jailbreakPrompt: '', customPrompt: '', generationMode: 'quiet', apiChoice: 'primary',
   secondaryApi: { baseUrl: '', model: '', temperature: null, maxTokens: null },
-  localPresets: [], activeLocalPresetId: null, scripts: [], storyLibrary: [], regexRules: [],
+  localPresets: [], activeLocalPresetId: null, scripts: [], storyLibrary: [], savedTheaters: [], regexRules: [],
   floatPosition: null, theaters: [], activeId: null, maxHistory: 30, maxTheaterTurns: 24,
   captureChat: true, captureCharacter: true, capturePersona: true, captureEmbeddedLore: true,
   modelProfiles: {}, compatibilityNotes: [],
@@ -33,7 +33,7 @@ function settings() {
   const s = c.extensionSettings[KEY];
   for (const [k,v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = clone(v);
   s.secondaryApi ||= clone(DEFAULTS.secondaryApi);
-  s.modelProfiles ||= {}; s.localPresets ||= []; s.regexRules ||= []; s.theaters ||= [];
+  s.modelProfiles ||= {}; s.localPresets ||= []; s.regexRules ||= []; s.theaters ||= []; s.savedTheaters ||= [];
   // Migrate the old setting without leaving the secret in exported extension settings.
   if (!secondaryKeySession && s.secondaryApi.apiKey) secondaryKeySession = String(s.secondaryApi.apiKey);
   if (Object.hasOwn(s.secondaryApi, 'apiKey')) { delete s.secondaryApi.apiKey; save(); }
@@ -166,7 +166,7 @@ function mount() {
   root.innerHTML = `
     <div class="sst060-backdrop" data-close="1"></div>
     <section class="sst060-app" role="dialog" aria-modal="true" aria-label="异想剧场">
-      <header class="sst060-head"><button id="sst060-close">←</button><div><b>🎭 异想剧场</b><small>独立番外空间 · v${VERSION}</small></div><button id="sst060-new">＋</button></header>
+      <header class="sst060-head"><button id="sst060-close">←</button><div><b>🎭 异想剧场</b><small>独立番外空间 · v${VERSION}</small></div><button id="sst060-save-theater" title="收藏当前小剧场" aria-label="收藏当前小剧场">♡</button><button id="sst060-new" title="新建小剧场" aria-label="新建小剧场">＋</button></header>
       <nav class="sst060-tabs"><button data-page="story" class="active">剧场</button><button data-page="scripts">剧本库</button><button data-page="presets">预设中心</button><button data-page="params">模型参数</button><button data-page="compat">脚本兼容</button><button data-page="archive">收藏馆</button><button data-page="settings">设置</button></nav>
       <main class="sst060-body">
         <section class="sst060-page active" id="sst060-page-story">
@@ -188,7 +188,7 @@ function mount() {
         <section class="sst060-page" id="sst060-page-compat" hidden>
           <div class="sst060-card"><h3>TavernHelper 脚本兼容性检查</h3><p>只识别脚本名称与可见元数据，不读取或复制第三方脚本实现；不自动启停任何脚本。检测不到可靠证据时会标成“待验证”，不会伪装成已验证。</p><div class="sst060-row"><button id="sst060-scan-compat">扫描已安装脚本</button><button id="sst060-add-compat">添加本地备注</button></div><div id="sst060-compat-list" class="sst060-list"></div><p class="sst060-note">已纳入关注项：Kemini 防路由脚本、Kemini「雪融雪降 v2」预设伴随脚本。这里仅记录识别结果和潜在冲突，不包含它们的源代码。</p></div>
         </section>
-        <section class="sst060-page" id="sst060-page-archive" hidden><div class="sst060-card"><h3>番外收藏馆</h3><input id="sst060-archive-search" placeholder="搜索标题或内容"><div id="sst060-archive-list" class="sst060-list"></div></div></section>
+        <section class="sst060-page" id="sst060-page-archive" hidden><div class="sst060-card"><h3>番外收藏馆</h3><p>这里保存你手动收藏的完整小剧场。生成内容会先留在剧场页面，不会自动拆成单条收藏。</p><input id="sst060-archive-search" placeholder="搜索剧场标题或内容"><div id="sst060-archive-list" class="sst060-list"></div></div></section>
         <section class="sst060-page" id="sst060-page-settings" hidden>
           <div class="sst060-card"><h3>创作设定</h3><label>系统提示词<textarea id="sst060-system" rows="3"></textarea></label><label>创作规则<textarea id="sst060-rules" rows="3"></textarea></label><label>自定义提示词<textarea id="sst060-custom" rows="3"></textarea></label><label>额外创作 / Jailbreak 提示词<textarea id="sst060-jailbreak" rows="3"></textarea></label><label>补充世界书<textarea id="sst060-lore" rows="4"></textarea></label></div>
           <div class="sst060-card"><h3>主线背景快照（只读）</h3><div class="sst060-row"><label><input type="checkbox" id="sst060-c-char"> 角色卡</label><label><input type="checkbox" id="sst060-c-persona"> Persona</label><label><input type="checkbox" id="sst060-c-chat"> 主线聊天</label><label><input type="checkbox" id="sst060-c-lore"> 内嵌世界书</label></div><label>读取最近消息数<input type="number" id="sst060-history" min="1" max="200"></label><div class="sst060-row"><button id="sst060-refresh-snapshot">刷新当前快照</button><button id="sst060-delete-theater">删除当前剧场</button><button id="sst060-export">导出剧场资料</button><button id="sst060-import">导入剧场资料</button><input type="file" id="sst060-data-file" accept=".json" hidden></div></div>
@@ -203,7 +203,7 @@ function mount() {
 function open() { $('#sst-v060-overlay')?.classList.add('open'); $('#sst-v060-overlay')?.setAttribute('aria-hidden','false'); render(); }
 function close() { $('#sst-v060-overlay')?.classList.remove('open'); $('#sst-v060-overlay')?.setAttribute('aria-hidden','true'); }
 function bindUI(root, floater) {
-  $('#sst060-close').onclick=close; $('#sst060-new').onclick=makeTheater; floater.onclick=open;
+  $('#sst060-close').onclick=close; $('#sst060-new').onclick=makeTheater; $('#sst060-save-theater').onclick=saveTheaterToArchive; floater.onclick=open;
   root.addEventListener('click', e => { if (e.target.dataset.close) close(); });
   document.addEventListener('keydown', e => { if (e.key==='Escape') close(); });
   $$('.sst060-tabs button',root).forEach(b => b.onclick=()=>showPage(b.dataset.page));
@@ -293,11 +293,18 @@ async function generate() {
         result=await c.generateRaw({systemPrompt:system,prompt});
       }
     }
-    if(!result)throw new Error('模型没有返回文本。');
-    const raw=String(result),content=applyRegex(raw);
+    const raw=typeof result==='string'?result:String(result??'');
+    if(!raw.trim())throw new Error('模型请求已结束，但没有收到可显示的文本内容。请检查当前主 API 的 Raw 返回结果。');
+    const content=applyRegex(raw);
+    // Persist only in this theater. Never send generated text to the main chat.
     t.messages.push({role:'user',content:input,time:Date.now()},{role:'assistant',content,rawContent:raw,time:Date.now()});
-    s.storyLibrary.push({id:uid(),title:input.length>36?input.slice(0,36)+'…':input,content,rawContent:raw,theaterId:t.id,createdAt:Date.now()});
-    $('#sst060-input').value='';save();render();
+    save();
+    $('#sst060-input').value='';
+    render();
+    const messageBox=$('#sst060-messages');
+    if(!messageBox || !messageBox.querySelector('.sst060-msg.assistant')) {
+      throw new Error('模型已返回文本，但剧场消息区没有成功渲染回复；内容已写入当前剧场设置，请重新打开剧场检查。');
+    }
   } catch(e) { console.error('[异想剧场]',e); alert('生成失败：'+(e?.message||e)); }
   finally {button.disabled=false;button.textContent='生成番外 ✦';}
 }
@@ -484,20 +491,58 @@ function renderScripts() {
   $$('[data-script-use]',el).forEach(b=>b.onclick=()=>{const x=s.scripts.find(y=>y.id===b.dataset.scriptUse);if(x){$('#sst060-input').value=x.content;showPage('story');}});
   $$('[data-script-delete]',el).forEach(b=>b.onclick=()=>{if(confirm('删除这个剧本？')){s.scripts=s.scripts.filter(x=>x.id!==b.dataset.scriptDelete);save();renderScripts();}});
 }
+function saveTheaterToArchive() {
+  const s=settings(),t=activeTheater(s);
+  if(!t.messages.length){toast('当前剧场还没有内容，暂时无法收藏。');return;}
+  s.savedTheaters ||= [];
+  const copy=clone(t);
+  copy.archiveId=uid();
+  copy.archivedAt=Date.now();
+  copy.archiveTitle=t.title||'未命名小剧场';
+  s.savedTheaters.push(copy);
+  save();
+  toast('整个小剧场已收藏到番外收藏馆。');
+  if($('#sst060-page-archive') && !$('#sst060-page-archive').hidden)renderArchive();
+}
 function deleteActiveTheater() {
   const s=settings(),t=activeTheater(s);if(!confirm(`删除剧场“${t.title}”？已经单独归档的番外仍会保留。`))return;
   s.theaters=s.theaters.filter(x=>x.id!==t.id);s.activeId=s.theaters[0]?.id||null;save();render();toast('当前剧场已删除。');
 }
 function renderArchive() {
-  const el=$('#sst060-archive-list');if(!el)return;const s=settings(),q=($('#sst060-archive-search').value||'').toLowerCase();const arr=s.storyLibrary.filter(x=>(x.title+' '+x.content).toLowerCase().includes(q)).slice().reverse();
-  el.innerHTML=arr.map(x=>`<article class="sst060-list-item"><b>${esc(x.title)}</b><small>${new Date(x.createdAt).toLocaleString()}</small><p>${esc(x.content.slice(0,360))}</p><details><summary>阅读全文</summary><pre>${esc(x.content)}</pre></details><button data-archive-delete="${esc(x.id)}">删除归档</button></article>`).join('')||'<p class="sst060-note">还没有番外归档。</p>';
-  $$('[data-archive-delete]',el).forEach(b=>b.onclick=()=>{if(confirm('删除这条归档？')){s.storyLibrary=s.storyLibrary.filter(x=>x.id!==b.dataset.archiveDelete);save();renderArchive();}});
+  const el=$('#sst060-archive-list');if(!el)return;
+  const s=settings(),q=($('#sst060-archive-search').value||'').toLowerCase();
+  s.savedTheaters ||= [];
+  const saved=s.savedTheaters.filter(t=>{
+    const text=[t.archiveTitle,t.title,...(t.messages||[]).map(m=>m.content)].join(' ').toLowerCase();
+    return text.includes(q);
+  }).slice().reverse();
+  const savedHtml=saved.map(t=>{
+    const messages=(t.messages||[]).map(m=>`<article class="sst060-msg ${m.role==='user'?'user':'assistant'}"><b>${m.role==='user'?'你':'剧场'}</b><div>${esc(m.content).replace(/\n/g,'<br>')}</div></article>`).join('');
+    const when=t.archivedAt?new Date(t.archivedAt).toLocaleString():'收藏时间未知';
+    return `<article class="sst060-list-item"><b>${esc(t.archiveTitle||t.title||'未命名小剧场')}</b><small>完整小剧场 · ${when} · ${(t.messages||[]).length} 条消息</small><details><summary>展开完整番外</summary><div class="sst060-archive-theater">${messages||'<p>此收藏没有消息内容。</p>'}</div></details><button data-theater-archive-delete="${esc(t.archiveId)}">删除这份收藏</button></article>`;
+  }).join('');
+  // Keep legacy single-story archives visible for users upgrading from earlier versions.
+  const legacy=s.storyLibrary.filter(x=>(x.title+' '+x.content).toLowerCase().includes(q)).slice().reverse();
+  const legacyHtml=legacy.length?`<div class="sst060-note">旧版本的单篇归档</div>`+legacy.map(x=>`<article class="sst060-list-item"><b>${esc(x.title)}</b><small>${new Date(x.createdAt).toLocaleString()}</small><p>${esc(x.content.slice(0,360))}</p><details><summary>阅读全文</summary><pre>${esc(x.content)}</pre></details><button data-archive-delete="${esc(x.id)}">删除旧归档</button></article>`).join(''):'';
+  el.innerHTML=(savedHtml+legacyHtml)||'<p class="sst060-note">还没有收藏的小剧场。回到剧场页面，点击顶部的 ♡ 即可收藏整个小剧场。</p>';
+  $$('[data-theater-archive-delete]',el).forEach(b=>b.onclick=()=>{
+    if(confirm('删除这份小剧场收藏？当前创作中的剧场不会受到影响。')){
+      s.savedTheaters=s.savedTheaters.filter(t=>t.archiveId!==b.dataset.theaterArchiveDelete);
+      save();renderArchive();
+    }
+  });
+  $$('[data-archive-delete]',el).forEach(b=>b.onclick=()=>{
+    if(confirm('删除这条旧版单篇归档？')){
+      s.storyLibrary=s.storyLibrary.filter(x=>x.id!==b.dataset.archiveDelete);
+      save();renderArchive();
+    }
+  });
 }
 function exportData() {
-  const s=settings(),t={version:VERSION,theaters:s.theaters,scripts:s.scripts,storyLibrary:s.storyLibrary,regexRules:s.regexRules,localPresets:s.localPresets,modelProfiles:s.modelProfiles,compatibilityNotes:s.compatibilityNotes};
+  const s=settings(),t={version:VERSION,theaters:s.theaters,scripts:s.scripts,storyLibrary:s.storyLibrary,savedTheaters:s.savedTheaters||[],regexRules:s.regexRules,localPresets:s.localPresets,modelProfiles:s.modelProfiles,compatibilityNotes:s.compatibilityNotes};
   const url=URL.createObjectURL(new Blob([JSON.stringify(t,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='side-story-theater-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-async function importData(e) {const f=e.target.files?.[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=settings();for(const k of ['theaters','scripts','storyLibrary','regexRules','localPresets','modelProfiles','compatibilityNotes'])if(Array.isArray(d[k])|| (k==='modelProfiles'&&d[k]&&typeof d[k]==='object'))s[k]=d[k];s.activeId=null;save();render();toast('资料导入完成。');}catch(err){alert('导入失败：'+err.message);}finally{e.target.value='';}}
+async function importData(e) {const f=e.target.files?.[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=settings();for(const k of ['theaters','scripts','storyLibrary','savedTheaters','regexRules','localPresets','modelProfiles','compatibilityNotes'])if(Array.isArray(d[k])|| (k==='modelProfiles'&&d[k]&&typeof d[k]==='object'))s[k]=d[k];s.activeId=null;save();render();toast('资料导入完成。');}catch(err){alert('导入失败：'+err.message);}finally{e.target.value='';}}
 
 let initialized = false;
 let readyListenerBound = false;
