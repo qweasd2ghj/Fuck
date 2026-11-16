@@ -2,7 +2,7 @@
 'use strict';
 
 const KEY = 'side_story_theater';
-const VERSION = '0.6.2';
+const VERSION = '0.6.3';
 let secondaryKeySession = '';
 let nativePresetRows = [];
 let presetSearch = '';
