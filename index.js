@@ -2,549 +2,435 @@
 'use strict';
 
 const KEY = 'side_story_theater';
+const VERSION = '0.6.0';
+let secondaryKeySession = '';
+let nativePresetRows = [];
+let presetSearch = '';
+let currentEditCopyId = null;
+let compatScan = [];
+
 const DEFAULTS = {
-  systemPrompt: '你是一位擅长角色扮演与同人创作的小说作者。尊重提供的人物设定、关系、世界观和时间线。',
+  systemPrompt: '你是一位擅长角色扮演与同人创作的小说作者。尊重人物设定、关系、世界观和时间线。',
   creativeRules: '本次内容是独立番外，不是主线已经发生的事实。不要修改、总结或声称写入主线记忆。保持角色言行符合设定。',
-  jailbreakPrompt: '',
-  customPrompt: '',
-  generationMode: 'quiet',
-  apiChoice: 'primary',
-  secondaryApi: { baseUrl:'', apiKey:'', model:'', temperature:null, maxTokens:null },
-  localPresets: [],
-  activeLocalPresetId: null,
-  scripts: [],
-  storyLibrary: [],
-  regexRules: [],
-  floatPosition: null,
-  theaters: [],
-  activeId: null,
-  maxHistory: 30,
-  maxTheaterTurns: 24,
-  captureChat: true,
-  captureCharacter: true,
-  capturePersona: true,
-  captureEmbeddedLore: true,
-  defaultTemperature: null,
-  defaultMaxTokens: null
+  jailbreakPrompt: '', customPrompt: '', generationMode: 'quiet', apiChoice: 'primary',
+  secondaryApi: { baseUrl: '', model: '', temperature: null, maxTokens: null },
+  localPresets: [], activeLocalPresetId: null, scripts: [], storyLibrary: [], regexRules: [],
+  floatPosition: null, theaters: [], activeId: null, maxHistory: 30, maxTheaterTurns: 24,
+  captureChat: true, captureCharacter: true, capturePersona: true, captureEmbeddedLore: true,
+  modelProfiles: {}, compatibilityNotes: [],
 };
-
-const $ = (sel, root=document) => root.querySelector(sel);
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-function ctx(){ return window.SillyTavern?.getContext?.(); }
-function settings(){
-  const c=ctx();
-  if(!c) throw new Error('未找到 SillyTavern 上下文');
-  c.extensionSettings[KEY] ||= structuredClone(DEFAULTS);
-  const s=c.extensionSettings[KEY];
-  for(const [k,v] of Object.entries(DEFAULTS)) if(s[k]===undefined) s[k]=structuredClone(v);
-  s.presets ||= structuredClone(DEFAULTS.presets);
-  s.theaters ||= [];
+const uid = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const clone = v => structuredClone(v);
+const ctx = () => window.SillyTavern?.getContext?.();
+function settings() {
+  const c = ctx();
+  if (!c) throw new Error('没有取得 SillyTavern 上下文');
+  c.extensionSettings ||= {};
+  c.extensionSettings[KEY] ||= clone(DEFAULTS);
+  const s = c.extensionSettings[KEY];
+  for (const [k,v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = clone(v);
+  s.secondaryApi ||= clone(DEFAULTS.secondaryApi);
+  s.modelProfiles ||= {}; s.localPresets ||= []; s.regexRules ||= []; s.theaters ||= [];
+  // Migrate the old setting without leaving the secret in exported extension settings.
+  if (!secondaryKeySession && s.secondaryApi.apiKey) secondaryKeySession = String(s.secondaryApi.apiKey);
+  if (Object.hasOwn(s.secondaryApi, 'apiKey')) { delete s.secondaryApi.apiKey; save(); }
   return s;
 }
-function save(){ ctx()?.saveSettingsDebounced?.(); }
-function currentCharacter(c){
-  if(c.characterId===undefined || !c.characters?.[c.characterId]) return null;
-  const card=c.characters[c.characterId], d=card.data||card;
-  return {name:card.name||d.name||'未命名角色', description:d.description||'', personality:d.personality||'',
-    scenario:d.scenario||'', first_mes:d.first_mes||'', mes_example:d.mes_example||'',
-    creator_notes:d.creator_notes||'', book:d.character_book||d.characterBook||null};
+function save() { ctx()?.saveSettingsDebounced?.(); }
+function toast(msg) { if (window.toastr?.info) window.toastr.info(msg); else console.info('[异想剧场]', msg); }
+function characterData(c) {
+  const card = c?.characters?.[c.characterId];
+  if (!card) return null;
+  const d = card.data || card;
+  return { name: card.name || d.name || '未命名角色', description:d.description||'', personality:d.personality||'', scenario:d.scenario||'', first_mes:d.first_mes||'', mes_example:d.mes_example||'', creator_notes:d.creator_notes||'', book:d.character_book||d.characterBook||null, raw:card };
 }
-function characterSnapshot(c){
-  const card=currentCharacter(c);
-  if(!card) return '当前没有选中的单人角色卡。';
-  let lore='';
-  if(card.book){
-    const entries=Array.isArray(card.book.entries)?card.book.entries:Object.values(card.book.entries||{});
-    lore=entries.filter(e=>!e.disable).map(e=>`【${e.name||e.keys||'角色卡世界书'}】\n${e.content||''}`).filter(Boolean).join('\n\n');
+function snapshot(s) {
+  const c = ctx(); const d = characterData(c); const parts = [];
+  if (s.captureCharacter) {
+    let lore = '';
+    if (s.captureEmbeddedLore && d?.book) {
+      const entries = Array.isArray(d.book.entries) ? d.book.entries : Object.values(d.book.entries || {});
+      lore = entries.filter(x => !x.disable).map(x => `【${x.name || x.keys || '世界书条目'}】\n${x.content || ''}`).join('\n\n');
+    }
+    parts.push(`【角色卡】\n角色：${d?.name || '未选择角色'}\n描述：${d?.description || ''}\n性格：${d?.personality || ''}\n场景：${d?.scenario || ''}\n开场白：${d?.first_mes || ''}\n示例：${d?.mes_example || ''}\n创作者注释：${d?.creator_notes || ''}\n角色卡内嵌世界书：\n${lore || '无/未读取'}`);
   }
-  return `角色名称：${card.name}\n角色描述：${card.description}\n性格：${card.personality}\n场景：${card.scenario}\n开场白：${card.first_mes}\n示例对话：${card.mes_example}\n创作者注释：${card.creator_notes}\n\n角色卡内嵌世界书（非禁用条目）：\n${lore||'无或未提供'}`;
+  if (s.capturePersona) {
+    const p = c?.powerUserSettings?.persona_description || c?.personaDescription || c?.persona?.description || '';
+    parts.push(`【User Persona】\n${p || '当前上下文未暴露 Persona 描述'}`);
+  }
+  const worldInfo = c?.worldInfo || c?.world_info || c?.activeWorldInfo || null;
+  if (worldInfo) {
+    const entries = Array.isArray(worldInfo) ? worldInfo : Object.values(worldInfo.entries || worldInfo);
+    const text = entries.filter(x => x && !x.disable && (x.content || x.text)).map(x => `【${x.name || x.comment || '世界书条目'}】\n${x.content || x.text}`).join('\n\n');
+    if (text) parts.push('【当前上下文暴露的世界书（只读）】\n' + text);
+  }
+  if (s.captureChat) {
+    const chat = Array.isArray(c?.chat) ? c.chat : [];
+    parts.push('【主线聊天只读快照】\n' + chat.slice(-s.maxHistory).map(m => `${m.is_user ? (c.name1 || 'User') : (m.name || c.name2 || '角色')}：${m.mes || m.message || ''}`).join('\n\n'));
+  }
+  const chatId = c?.chatId || c?.chatMetadata?.chat_id || '当前聊天';
+  return { text:parts.join('\n\n'), sourceLabel:`${d?.name || '当前角色'} · ${chatId}`, capturedAt:Date.now() };
 }
-function personaSnapshot(c){
-  const p=c.powerUserSettings?.persona_description||c.personaDescription||c.persona?.description||'';
-  return `User 名称：${c.name1||'User'}\nUser Persona：${p||'当前上下文未暴露 Persona 描述'}`;
-}
-function chatSnapshot(c, max){
-  const chat=Array.isArray(c.chat)?c.chat:[];
-  return chat.slice(-max).map(m=>{
-    const name=m.is_user?(c.name1||'User'):(m.name||c.name2||'角色');
-    return `${name}：${m.mes||m.message||''}`;
-  }).join('\n\n');
-}
-function makeSnapshot(s){
-  const c=ctx();
-  const bits=[];
-  if(s.captureCharacter) bits.push('【角色卡】\n'+characterSnapshot(c));
-  if(s.capturePersona) bits.push('【用户人设】\n'+personaSnapshot(c));
-  if(s.captureChat) bits.push('【主线聊天记录（只读背景）】\n'+chatSnapshot(c,s.maxHistory));
-  const chatId=c.chatId||c.chatMetadata?.chat_id||c.chatMetadata?.chatId||'当前聊天';
-  const char=currentCharacter(c)?.name||'当前角色';
-  return {text:bits.join('\n\n'), sourceLabel:`${char} · ${chatId}`, capturedAt:Date.now()};
-}
-function getTheater(s){
-  let t=s.theaters.find(x=>x.id===s.activeId);
-  if(!t){ t={id:uuid(),title:'新建小剧场',messages:[],createdAt:Date.now(),snapshot:null,loreSupplement:''}; s.theaters.unshift(t); s.activeId=t.id; save(); }
+function activeTheater(s) {
+  let t = s.theaters.find(x => x.id === s.activeId);
+  if (!t) { t = {id:uid(),title:'新建小剧场',messages:[],createdAt:Date.now(),snapshot:snapshot(s),loreSupplement:''}; s.theaters.unshift(t); s.activeId=t.id; save(); }
   return t;
 }
-function newTheater(){
-  const s=settings(), t={id:uuid(),title:'新建小剧场',messages:[],createdAt:Date.now(),snapshot:makeSnapshot(s),loreSupplement:''};
-  s.theaters.unshift(t);s.activeId=t.id;save();render();
+function makeTheater() {
+  const s=settings(); const t={id:uid(),title:'新建小剧场',messages:[],createdAt:Date.now(),snapshot:snapshot(s),loreSupplement:''};
+  s.theaters.unshift(t); s.activeId=t.id; save(); render();
 }
-function openOverlay(){
-  const root=$('#sst-overlay');
-  if(!root) return;
-  root.classList.add('open');root.setAttribute('aria-hidden','false');
-  document.body.classList.add('sst-lock-scroll');
-  render();
-}
-function closeOverlay(){
-  const root=$('#sst-overlay');
-  if(!root) return;
-  root.classList.remove('open');root.setAttribute('aria-hidden','true');
-  document.body.classList.remove('sst-lock-scroll');
-}
-function toggleOverlay(){ $('#sst-overlay')?.classList.contains('open')?closeOverlay():openOverlay(); }
-function ensureUI(){
-  if($('#sst-overlay')) return;
-  const overlay=document.createElement('div');
-  overlay.id='sst-overlay';overlay.setAttribute('aria-hidden','true');
-  overlay.innerHTML=`
-    <div class="sst-backdrop" data-close="1"></div>
-    <section class="sst-app" role="dialog" aria-modal="true" aria-label="异想剧场">
-      <header class="sst-top">
-        <button class="sst-icon-btn" id="sst-close" aria-label="关闭剧场">←</button>
-        <div class="sst-brand"><strong>🎭 异想剧场</strong><small>SIDE STORY · 独立番外空间</small></div>
-        <button class="sst-icon-btn" id="sst-new" aria-label="新建剧场">＋</button>
-      </header>
-      <nav class="sst-tabs" id="sst-tabs"></nav>
-      <main class="sst-main">
-        <div class="sst-titlebar">
-          <input id="sst-title" aria-label="剧场名称" maxlength="60">
-          <button id="sst-open-settings" class="sst-soft-btn">⚙ 设置</button>
-        </div>
-        <div id="sst-source" class="sst-source"></div>
-        <nav class="sst-library-nav">
-          <button data-page="theater" class="active">剧场</button>
-          <button data-page="scripts">剧本库</button>
-          <button data-page="archive">番外收藏馆</button>
-          <button data-page="beautify">正则美化</button>
-        </nav>
-        <div id="sst-page-theater" class="sst-page active">
-          <div id="sst-messages" class="sst-messages"></div>
-        </div>
-        <section id="sst-page-scripts" class="sst-page" hidden>
-          <div class="sst-library-head"><strong>可重复使用的剧本</strong><button id="sst-add-script">＋ 新建剧本</button></div>
-          <div id="sst-scripts-list"></div>
-          <div id="sst-script-editor" class="sst-editor" hidden>
-            <input id="sst-script-title" placeholder="剧本名称">
-            <textarea id="sst-script-content" rows="7" placeholder="写下剧本内容、事件设定或开场要求"></textarea>
-            <div class="sst-button-row"><button id="sst-save-script">保存剧本</button><button id="sst-cancel-script">取消</button></div>
-          </div>
+
+function mount() {
+  if ($('#sst-v060-overlay')) return;
+  const root = document.createElement('div'); root.id='sst-v060-overlay'; root.setAttribute('aria-hidden','true');
+  root.innerHTML = `
+    <div class="sst060-backdrop" data-close="1"></div>
+    <section class="sst060-app" role="dialog" aria-modal="true" aria-label="异想剧场">
+      <header class="sst060-head"><button id="sst060-close">←</button><div><b>🎭 异想剧场</b><small>独立番外空间 · v${VERSION}</small></div><button id="sst060-new">＋</button></header>
+      <nav class="sst060-tabs"><button data-page="story" class="active">剧场</button><button data-page="scripts">剧本库</button><button data-page="presets">预设中心</button><button data-page="params">模型参数</button><button data-page="compat">脚本兼容</button><button data-page="archive">收藏馆</button><button data-page="settings">设置</button></nav>
+      <main class="sst060-body">
+        <section class="sst060-page active" id="sst060-page-story">
+          <div id="sst060-theater-tabs" class="sst060-theater-tabs"></div><div class="sst060-title"><input id="sst060-title" aria-label="剧场名称"><span id="sst060-source"></span></div>
+          <div id="sst060-messages" class="sst060-messages"></div>
+          <div class="sst060-compose"><textarea id="sst060-input" rows="3" placeholder="写下想看的番外……"></textarea><div class="sst060-actions"><select id="sst060-mode"><option value="quiet">Quiet · 沿用当前酒馆提示词上下文</option><option value="raw">Raw · 独立上下文</option></select><select id="sst060-api"><option value="primary">主 API · 当前酒馆连接</option><option value="secondary">副 API · 独立接口</option></select><button id="sst060-generate">生成番外 ✦</button></div></div>
         </section>
-        <section id="sst-page-archive" class="sst-page" hidden>
-          <div class="sst-library-head"><strong>生成过的番外</strong><input id="sst-archive-search" placeholder="搜索标题或内容"></div>
-          <div id="sst-archive-list"></div>
+        <section class="sst060-page" id="sst060-page-scripts" hidden>
+          <div class="sst060-card"><h3>可复用剧本 / 开场设定</h3><label>剧本名称<input id="sst060-script-name" placeholder="例如：雨夜重逢"></label><label>剧本内容<textarea id="sst060-script-content" rows="5" placeholder="保存常用的事件设定、开场词或剧情要求"></textarea></label><div class="sst060-row"><button id="sst060-save-script">保存剧本</button><button id="sst060-clear-script-form">清空输入</button></div><div id="sst060-script-list" class="sst060-list"></div></div>
         </section>
-        <section id="sst-page-beautify" class="sst-page" hidden>
-          <div class="sst-library-head"><strong>输出正则美化规则</strong><button id="sst-add-regex">＋ 添加规则</button></div>
-          <div class="sst-button-row"><button id="sst-scan-regex">扫描酒馆全局 / 当前聊天正则</button><button id="sst-import-regex">导入正则 JSON</button><input id="sst-regex-file" type="file" accept=".json,application/json" hidden></div>
-          <p class="sst-note">扫描结果会复制到异想剧场的独立规则列表，按来源标记全局或当前聊天。编辑和启用状态不会反向修改酒馆原正则。</p>
-          <p class="sst-note">规则只处理剧场显示与归档的输出，不修改主线聊天。请谨慎使用复杂正则，避免灾难性回溯。</p>
-          <div id="sst-regex-list"></div>
-          <div id="sst-regex-editor" class="sst-editor" hidden>
-            <input id="sst-regex-name" placeholder="规则名称">
-            <input id="sst-regex-pattern" placeholder="查找正则，例如：\\*\\*(.*?)\\*\\*">
-            <input id="sst-regex-replace" placeholder="替换内容，例如：$1">
-            <div class="sst-regex-flags">
-              <label><input id="sst-regex-global" type="checkbox" checked> 全局 g</label>
-              <label><input id="sst-regex-insensitive" type="checkbox"> 忽略大小写 i</label>
-              <label><input id="sst-regex-enabled" type="checkbox" checked> 启用</label>
-            </div>
-            <label>测试文本<textarea id="sst-regex-test" rows="3"></textarea></label>
-            <label>预览<textarea id="sst-regex-preview" rows="3" readonly></textarea></label>
-            <div class="sst-button-row"><button id="sst-save-regex">保存规则</button><button id="sst-cancel-regex">取消</button></div>
-          </div>
+        <section class="sst060-page" id="sst060-page-presets" hidden>
+          <div class="sst060-card"><h3>酒馆原生 Prompt Manager 预设</h3><p>扫描结果只读。选择某个原生预设并建立副本后，才可在下方批量编辑；不会覆盖酒馆原文件。</p><div class="sst060-row"><button id="sst060-scan-presets">扫描酒馆预设</button><input id="sst060-preset-search" placeholder="搜索预设 / 条目"></div><div id="sst060-native-presets" class="sst060-list"></div></div>
+          <div class="sst060-card"><h3>异想剧场预设副本 · 批量编辑表</h3><div class="sst060-row"><select id="sst060-copy-select"><option value="">选择预设副本</option></select><button id="sst060-import-preset">手动导入 JSON</button><input type="file" id="sst060-preset-file" accept=".json,application/json" hidden></div><div class="sst060-row"><input id="sst060-prompt-filter" placeholder="筛选提示词条目"><button id="sst060-select-all">全选</button><button id="sst060-select-none">全不选</button><button id="sst060-enable-selected">批量启用</button><button id="sst060-disable-selected">批量停用</button><button id="sst060-save-copy">保存全部修改</button></div><div class="sst060-table-wrap"><table class="sst060-table"><thead><tr><th><input type="checkbox" id="sst060-table-all"></th><th>启用</th><th>名称 / 角色</th><th>提示词内容（副本）</th></tr></thead><tbody id="sst060-prompt-rows"></tbody></table></div></div>
         </section>
-        <div class="sst-composer">
-          <textarea id="sst-input" rows="3" placeholder="写下你想看的番外……"></textarea>
-          <div class="sst-compose-actions">
-            <select id="sst-generation-mode" aria-label="生成模式">
-              <option value="quiet">沿用酒馆提示词预设（Quiet）</option>
-              <option value="raw">独立 Raw（不套用 Prompt Manager）</option>
-            </select>
-            <select id="sst-api-choice" aria-label="模型接口">
-              <option value="primary">主 API · 酒馆当前模型</option>
-              <option value="secondary">副 API · 备用模型</option>
-            </select>
-            <button id="sst-generate" class="sst-generate">生成剧场 ✦</button>
-          </div>
-        </div>
-        <section id="sst-settings" class="sst-settings" hidden>
-          <div class="sst-settings-head"><strong>剧场设置</strong><button id="sst-settings-close" class="sst-icon-btn">✕</button></div>
-          <label>系统提示词<textarea id="sst-system" rows="3"></textarea></label>
-          <label>创作规则<textarea id="sst-rules" rows="3"></textarea></label>
-          <label>自定义创作提示词<textarea id="sst-custom-prompt" rows="3" placeholder="例如：整体风格偏吐槽、节奏轻快，多写角色之间的互怼。仅作用于异想剧场，不必改动酒馆预设。"></textarea></label>
-          <label>额外创作 / 破限提示词<textarea id="sst-jailbreak" rows="3" placeholder="可选：补充创作边界、文风或角色表现要求"></textarea></label>
-          <div class="sst-preset-info">
-            <strong>异想剧场预设副本</strong>
-            <p>导入酒馆导出的 Prompt Manager 预设 JSON 后，会在这里保存一份独立副本。你可以编辑副本中的提示词条目、启用/停用并应用到番外；不会覆盖酒馆原预设。</p>
-            <div class="sst-button-row"><button id="sst-import-preset">导入预设 JSON</button><button id="sst-save-preset">将当前配置另存为预设</button><input id="sst-preset-file" type="file" accept=".json,application/json" hidden></div>
-            <div id="sst-preset-list"></div>
-          </div>
-          <div class="sst-preset-info">
-            <strong>副 API（可选）</strong>
-            <p>主 API 直接沿用酒馆当前连接；副 API 使用独立的 OpenAI 兼容 Chat Completions 接口。API Key 仅保存在本机酒馆扩展设置中，请勿导出或分享设置文件。</p>
-            <label>接口基础 URL<input id="sst-secondary-url" type="url" placeholder="https://example.com/v1"></label>
-            <label>API Key<input id="sst-secondary-key" type="password" autocomplete="off" placeholder="副 API 密钥"></label>
-            <label>模型名称<input id="sst-secondary-model" placeholder="model-name"></label>
-            <label>温度<input id="sst-secondary-temperature" type="number" min="0" max="2" step="0.05" placeholder="留空使用模型默认值"></label>
-            <label>最大输出 Token<input id="sst-secondary-max-tokens" type="number" min="1" step="1" placeholder="留空使用模型默认值"></label>
-            <button id="sst-save-secondary">保存副 API</button>
-          </div>
-          <div class="sst-preset-info">
-            <strong>酒馆原生提示词预设</strong>
-            <p>这里不再创建假冒的酒馆预设。Chat Completion 使用 AI Response Configuration 中的 Prompt Manager；Text Completion 使用 Advanced Formatting。选择 Quiet 模式时，生成请求会经过酒馆当前配置；Raw 模式则只使用本剧场自行组装的提示词。</p>
-          </div>
-          <label>补充世界书 / 额外设定<textarea id="sst-lore" rows="5" placeholder="可粘贴世界书条目或跨作品角色资料"></textarea></label>
-          <div class="sst-settings-grid">
-            <label><input type="checkbox" id="sst-capture-character"> 读取角色卡</label>
-            <label><input type="checkbox" id="sst-capture-persona"> 读取 User Persona</label>
-            <label><input type="checkbox" id="sst-capture-chat"> 读取主线聊天记录</label>
-            <label><input type="checkbox" id="sst-capture-lore"> 读取角色卡内嵌世界书</label>
-          </div>
-          <label>读取最近主线消息数<input id="sst-max-history" type="number" min="1" max="200"></label>
-          <p class="sst-note">主线背景快照只读保存。Quiet 模式会使用酒馆当前聊天上下文及当前 Prompt Manager / Advanced Formatting（主线不会被写入），因此适合沿用角色卡、世界书与酒馆预设；Raw 模式只发送本剧场快照和剧场历史，隔离性更强，但不会自动套用酒馆 Prompt Manager 的提示词列表。</p>
-          <div class="sst-button-row"><button id="sst-refresh-context">刷新主线背景</button><button id="sst-export">导出剧场</button><button id="sst-import">导入剧场</button><input id="sst-file" type="file" accept="application/json" hidden></div>
-          <div class="sst-button-row"><button id="sst-rename">重命名</button><button id="sst-clear">清空本剧场</button><button id="sst-delete" class="sst-danger">删除本剧场</button></div>
+        <section class="sst060-page" id="sst060-page-params" hidden>
+          <div class="sst060-card"><h3>模型参数档案</h3><p>按 API / Provider + Model ID 分别保存。系统不会猜测模型能力；只有你勾选为支持的参数才会发送到副 API。主 API 的参数档案可保存，但不会擅自改写酒馆全局预设。</p><label>最大输出参数字段<select id="sst060-max-token-field"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label><div class="sst060-row"><label>接口类型 / Provider<input id="sst060-provider" placeholder="例如 OpenAI / OpenRouter / Google"></label><label>Model ID<input id="sst060-model-id" placeholder="准确模型 ID"></label></div><div class="sst060-row"><button id="sst060-load-profile">载入此模型档案</button><button id="sst060-save-profile">保存此模型档案</button><button id="sst060-reset-profile">清空档案</button></div><div id="sst060-profile-fields" class="sst060-param-grid"></div><div id="sst060-profile-note" class="sst060-note"></div></div>
+          <div class="sst060-card"><h3>副 API 连接</h3><div class="sst060-row"><label>基础 URL<input id="sst060-base-url" placeholder="https://example.com/v1"></label><label>API Key<input id="sst060-api-key" type="password" autocomplete="off" placeholder="仅本次页面会话保存"></label></div><div class="sst060-row"><label>副 API Model ID<input id="sst060-secondary-model" placeholder="model-id"></label><button id="sst060-fetch-models">读取 /models</button></div><div class="sst060-row"><select id="sst060-model-list"><option value="">读取到的模型会列在这里</option></select><button id="sst060-save-api">保存连接设置</button></div><small>API Key 不写入酒馆扩展设置、备份或 ZIP；刷新页面后需重新输入。模型列表读取失败时仍可手动填写 ID。</small></div>
+        </section>
+        <section class="sst060-page" id="sst060-page-compat" hidden>
+          <div class="sst060-card"><h3>TavernHelper 脚本兼容性检查</h3><p>只识别脚本名称与可见元数据，不读取或复制第三方脚本实现；不自动启停任何脚本。检测不到可靠证据时会标成“待验证”，不会伪装成已验证。</p><div class="sst060-row"><button id="sst060-scan-compat">扫描已安装脚本</button><button id="sst060-add-compat">添加本地备注</button></div><div id="sst060-compat-list" class="sst060-list"></div><p class="sst060-note">已纳入关注项：Kemini 防路由脚本、Kemini「雪融雪降 v2」预设伴随脚本。这里仅记录识别结果和潜在冲突，不包含它们的源代码。</p></div>
+        </section>
+        <section class="sst060-page" id="sst060-page-archive" hidden><div class="sst060-card"><h3>番外收藏馆</h3><input id="sst060-archive-search" placeholder="搜索标题或内容"><div id="sst060-archive-list" class="sst060-list"></div></div></section>
+        <section class="sst060-page" id="sst060-page-settings" hidden>
+          <div class="sst060-card"><h3>创作设定</h3><label>系统提示词<textarea id="sst060-system" rows="3"></textarea></label><label>创作规则<textarea id="sst060-rules" rows="3"></textarea></label><label>自定义提示词<textarea id="sst060-custom" rows="3"></textarea></label><label>额外创作 / Jailbreak 提示词<textarea id="sst060-jailbreak" rows="3"></textarea></label><label>补充世界书<textarea id="sst060-lore" rows="4"></textarea></label></div>
+          <div class="sst060-card"><h3>主线背景快照（只读）</h3><div class="sst060-row"><label><input type="checkbox" id="sst060-c-char"> 角色卡</label><label><input type="checkbox" id="sst060-c-persona"> Persona</label><label><input type="checkbox" id="sst060-c-chat"> 主线聊天</label><label><input type="checkbox" id="sst060-c-lore"> 内嵌世界书</label></div><label>读取最近消息数<input type="number" id="sst060-history" min="1" max="200"></label><div class="sst060-row"><button id="sst060-refresh-snapshot">刷新当前快照</button><button id="sst060-delete-theater">删除当前剧场</button><button id="sst060-export">导出剧场资料</button><button id="sst060-import">导入剧场资料</button><input type="file" id="sst060-data-file" accept=".json" hidden></div></div>
+          <div class="sst060-card"><h3>独立输出正则</h3><button id="sst060-scan-regex">扫描全局 / 当前角色规则并复制</button><button id="sst060-import-regex">导入规则 JSON</button><input type="file" id="sst060-regex-file" accept=".json" hidden><div id="sst060-regex-list" class="sst060-list"></div></div>
         </section>
       </main>
     </section>`;
-  document.body.append(overlay);
-
-  const float=document.createElement('button');
-  float.id='sst-float';float.type='button';float.innerHTML='<span>🎭</span><small>剧场</small>';float.setAttribute('aria-label','打开异想剧场');
-  document.body.append(float);
-
-  $('#sst-close').addEventListener('click',closeOverlay);
-  $('#sst-new').addEventListener('click',newTheater);
-  $('#sst-open-settings').addEventListener('click',()=>{$('#sst-settings').hidden=false;});
-  $('#sst-settings-close').addEventListener('click',()=>{$('#sst-settings').hidden=true;});
-  $('#sst-float').addEventListener('click',openOverlay);
-  overlay.addEventListener('click',e=>{if(e.target.dataset.close)closeOverlay();});
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#sst-overlay')?.classList.contains('open'))closeOverlay();});
-  bindToolbarButton();
-  bindSettings();
-  bindLibrary();
-  bindDraggableFloat(float);
-  overlay.querySelectorAll('.sst-library-nav [data-page]').forEach(b=>b.addEventListener('click',()=>showPage(b.dataset.page)));
-  render();
+  document.body.append(root);
+  const floater=document.createElement('button'); floater.id='sst060-float'; floater.innerHTML='🎭<small>剧场</small>'; floater.type='button'; floater.title='打开异想剧场'; document.body.append(floater);
+  bindUI(root, floater); render();
 }
-function bindToolbarButton(){
-  // Use the Extensions menu rather than injecting into the crowded top icon strip.
-  const add=()=>{
-    const menu=$('#extensionsMenu')||$('#extensions-menu');
-    if(!menu||$('#sst-toolbar-open')) return;
-    const b=document.createElement('div');
-    b.id='sst-toolbar-open';b.className='list-group-item flex-container flexGap5 interactable';
-    b.setAttribute('role','button');b.tabIndex=0;
-    b.innerHTML='<i class="fa-solid fa-masks-theater"></i><span>异想剧场</span>';
-    b.addEventListener('click',openOverlay);
-    b.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openOverlay();}});
-    menu.append(b);
-  };
-  add();
-  const mo=new MutationObserver(add);
-  mo.observe(document.body,{childList:true,subtree:true});
-  setTimeout(()=>mo.disconnect(),15000);
+function open() { $('#sst-v060-overlay')?.classList.add('open'); $('#sst-v060-overlay')?.setAttribute('aria-hidden','false'); render(); }
+function close() { $('#sst-v060-overlay')?.classList.remove('open'); $('#sst-v060-overlay')?.setAttribute('aria-hidden','true'); }
+function bindUI(root, floater) {
+  $('#sst060-close').onclick=close; $('#sst060-new').onclick=makeTheater; floater.onclick=open;
+  root.addEventListener('click', e => { if (e.target.dataset.close) close(); });
+  document.addEventListener('keydown', e => { if (e.key==='Escape') close(); });
+  $$('.sst060-tabs button',root).forEach(b => b.onclick=()=>showPage(b.dataset.page));
+  $('#sst060-generate').onclick=generate;
+  $('#sst060-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();generate();}});
+  $('#sst060-mode').onchange=e=>{settings().generationMode=e.target.value;save();};
+  $('#sst060-api').onchange=e=>{settings().apiChoice=e.target.value;save();refreshModelIdentity();};
+  $('#sst060-title').onchange=e=>{const t=activeTheater(settings());t.title=e.target.value;save();render();};
+  $('#sst060-lore').onchange=e=>{activeTheater(settings()).loreSupplement=e.target.value;save();};
+  ['system','rules','custom','jailbreak'].forEach(k=>$('#sst060-'+k).onchange=e=>{const s=settings();s[k==='system'?'systemPrompt':k==='rules'?'creativeRules':k==='custom'?'customPrompt':'jailbreakPrompt']=e.target.value;save();});
+  [['char','captureCharacter'],['persona','capturePersona'],['chat','captureChat'],['lore','captureEmbeddedLore']].forEach(([id,key])=>$('#sst060-c-'+id).onchange=e=>{settings()[key]=e.target.checked;save();});
+  $('#sst060-history').onchange=e=>{settings().maxHistory=Math.max(1,Math.min(200,Number(e.target.value)||30));save();};
+  $('#sst060-refresh-snapshot').onclick=()=>{const t=activeTheater(settings());t.snapshot=snapshot(settings());save();render();toast('背景快照已刷新');};
+  $('#sst060-delete-theater').onclick=deleteActiveTheater;
+  $('#sst060-save-script').onclick=saveScript; $('#sst060-clear-script-form').onclick=()=>{$('#sst060-script-name').value='';$('#sst060-script-content').value='';};
+  $('#sst060-scan-presets').onclick=scanNativePresets;
+  $('#sst060-preset-search').oninput=e=>{presetSearch=e.target.value.toLowerCase();renderNativePresets();};
+  $('#sst060-copy-select').onchange=renderPromptTable;
+  $('#sst060-prompt-filter').oninput=filterPromptRows;
+  $('#sst060-select-all').onclick=()=>$$('[data-prompt-select]').forEach(x=>x.checked=true);
+  $('#sst060-select-none').onclick=()=>$$('[data-prompt-select]').forEach(x=>x.checked=false);
+  $('#sst060-table-all').onchange=e=>$$('[data-prompt-select]').forEach(x=>x.checked=e.target.checked);
+  $('#sst060-enable-selected').onclick=()=>batchPromptEnabled(true);
+  $('#sst060-disable-selected').onclick=()=>batchPromptEnabled(false);
+  $('#sst060-save-copy').onclick=savePromptTable;
+  $('#sst060-import-preset').onclick=()=>$('#sst060-preset-file').click();
+  $('#sst060-preset-file').onchange=importPresetFile;
+  $('#sst060-fetch-models').onclick=fetchModels;
+  $('#sst060-save-api').onclick=saveSecondarySettings;
+  $('#sst060-model-list').onchange=e=>{if(e.target.value){$('#sst060-secondary-model').value=e.target.value;refreshModelIdentity();}};
+  $('#sst060-load-profile').onclick=loadProfile; $('#sst060-save-profile').onclick=saveProfile; $('#sst060-reset-profile').onclick=resetProfile;
+  $('#sst060-scan-compat').onclick=scanCompatibility; $('#sst060-add-compat').onclick=addCompatNote;
+  $('#sst060-archive-search').oninput=renderArchive;
+  $('#sst060-export').onclick=exportData; $('#sst060-import').onclick=()=>$('#sst060-data-file').click(); $('#sst060-data-file').onchange=importData;
+  $('#sst060-scan-regex').onclick=scanRegex; $('#sst060-import-regex').onclick=()=>$('#sst060-regex-file').click(); $('#sst060-regex-file').onchange=importRegex;
+  renderProfileFields();
+  makeDraggable(floater);
+  bindExtensionsMenu();
 }
-function bindDraggableFloat(el){
-  const s=settings();
-  if(s.floatPosition && Number.isFinite(s.floatPosition.x) && Number.isFinite(s.floatPosition.y)){
-    el.style.left=s.floatPosition.x+'px';el.style.top=s.floatPosition.y+'px';el.style.right='auto';el.style.bottom='auto';
-  }
+function bindExtensionsMenu() {
+  const add=()=>{const menu=$('#extensionsMenu')||$('#extensions-menu');if(!menu||$('#sst060-toolbar'))return;const b=document.createElement('div');b.id='sst060-toolbar';b.className='list-group-item flex-container flexGap5 interactable';b.setAttribute('role','button');b.tabIndex=0;b.textContent='🎭 异想剧场';b.onclick=open;menu.append(b);};
+  add(); const mo=new MutationObserver(add); mo.observe(document.body,{childList:true,subtree:true}); setTimeout(()=>mo.disconnect(),15000);
+}
+function makeDraggable(el) {
+  const s=settings(); if(s.floatPosition){el.style.left=s.floatPosition.x+'px';el.style.top=s.floatPosition.y+'px';el.style.right='auto';el.style.bottom='auto';}
   let sx=0,sy=0,ox=0,oy=0,moved=false;
-  el.addEventListener('pointerdown',e=>{
-    const r=el.getBoundingClientRect();sx=e.clientX;sy=e.clientY;ox=r.left;oy=r.top;moved=false;
-    el.setPointerCapture(e.pointerId);
-  });
-  el.addEventListener('pointermove',e=>{
-    if(!el.hasPointerCapture(e.pointerId))return;
-    const dx=e.clientX-sx,dy=e.clientY-sy;
-    if(Math.abs(dx)+Math.abs(dy)>7)moved=true;
-    if(!moved)return;
-    const x=Math.max(4,Math.min(innerWidth-el.offsetWidth-4,ox+dx));
-    const y=Math.max(4,Math.min(innerHeight-el.offsetHeight-4,oy+dy));
-    el.style.left=x+'px';el.style.top=y+'px';el.style.right='auto';el.style.bottom='auto';
-  });
-  el.addEventListener('pointerup',()=>{
-    if(moved){
-      const r=el.getBoundingClientRect();
-      s.floatPosition={x:Math.max(4,Math.min(innerWidth-el.offsetWidth-4,r.left)),y:Math.max(4,Math.min(innerHeight-el.offsetHeight-4,r.top))};
-      save();
-    }
-  });
+  el.addEventListener('pointerdown',e=>{const r=el.getBoundingClientRect();sx=e.clientX;sy=e.clientY;ox=r.left;oy=r.top;moved=false;el.setPointerCapture(e.pointerId);});
+  el.addEventListener('pointermove',e=>{if(!el.hasPointerCapture(e.pointerId))return;const dx=e.clientX-sx,dy=e.clientY-sy;if(Math.abs(dx)+Math.abs(dy)>6)moved=true;if(moved){el.style.left=Math.max(4,Math.min(innerWidth-el.offsetWidth-4,ox+dx))+'px';el.style.top=Math.max(4,Math.min(innerHeight-el.offsetHeight-4,oy+dy))+'px';el.style.right='auto';el.style.bottom='auto';}});
+  el.addEventListener('pointerup',()=>{if(moved){const r=el.getBoundingClientRect();s.floatPosition={x:r.left,y:r.top};save();}});
   el.addEventListener('click',e=>{if(moved){e.preventDefault();e.stopImmediatePropagation();moved=false;}},true);
 }
-function showPage(page){
-  document.querySelectorAll('#sst-overlay .sst-page').forEach(p=>{p.hidden=p.id!=='sst-page-'+page;p.classList.toggle('active',p.id==='sst-page-'+page);});
-  document.querySelectorAll('#sst-overlay .sst-library-nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
-  if(page==='scripts')renderScripts();
-  if(page==='archive')renderArchive();
-  if(page==='beautify')renderRegexRules();
+function showPage(page) {
+  $$('.sst060-page').forEach(p=>{p.hidden=p.id!=='sst060-page-'+page;p.classList.toggle('active',!p.hidden);});
+  $$('.sst060-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
+  if(page==='archive')renderArchive(); if(page==='scripts')renderScripts(); if(page==='presets')renderPromptTable(); if(page==='compat')renderCompatibility(); if(page==='settings')renderRegex();
 }
-function bindSettings(){
-  const s=settings();
-  const set=(id,key,parse=v=>v)=>{$(id).addEventListener('change',e=>{s[key]=parse(e.target.type==='checkbox'?e.target.checked:e.target.value);save();});};
-  set('#sst-system','systemPrompt');set('#sst-rules','creativeRules');set('#sst-jailbreak','jailbreakPrompt');set('#sst-custom-prompt','customPrompt');
-  set('#sst-capture-character','captureCharacter',Boolean);set('#sst-capture-persona','capturePersona',Boolean);
-  set('#sst-capture-chat','captureChat',Boolean);set('#sst-capture-lore','captureEmbeddedLore',Boolean);
-  set('#sst-max-history','maxHistory',v=>Math.max(1,Math.min(200,Number(v)||30)));
-  $('#sst-generation-mode').value=s.generationMode||'quiet';
-  $('#sst-generation-mode').addEventListener('change',e=>{s.generationMode=e.target.value;save();});
-  $('#sst-api-choice').value=s.apiChoice||'primary';
-  $('#sst-api-choice').addEventListener('change',e=>{s.apiChoice=e.target.value;save();});
-  $('#sst-secondary-url').value=s.secondaryApi?.baseUrl||'';
-  $('#sst-secondary-key').value=s.secondaryApi?.apiKey||'';
-  $('#sst-secondary-model').value=s.secondaryApi?.model||'';
-  $('#sst-secondary-temperature').value=s.secondaryApi?.temperature??'';
-  $('#sst-secondary-max-tokens').value=s.secondaryApi?.maxTokens??'';
-  $('#sst-save-secondary').addEventListener('click',()=>{
-    s.secondaryApi={baseUrl:$('#sst-secondary-url').value.trim().replace(/\/$/,''),apiKey:$('#sst-secondary-key').value.trim(),model:$('#sst-secondary-model').value.trim(),temperature:$('#sst-secondary-temperature').value===''?null:Number($('#sst-secondary-temperature').value),maxTokens:$('#sst-secondary-max-tokens').value===''?null:Number($('#sst-secondary-max-tokens').value)};
-    save();toast('副 API 配置已保存');
-  });
-  $('#sst-import-preset').addEventListener('click',()=>$('#sst-preset-file').click());
-  $('#sst-preset-file').addEventListener('change',importLocalPreset);
-  $('#sst-save-preset').addEventListener('click',saveLocalPreset);
-  renderLocalPresets();
-  $('#sst-lore').addEventListener('change',e=>{const t=getTheater(s);t.loreSupplement=e.target.value;save();});
-  $('#sst-refresh-context').addEventListener('click',()=>{const t=getTheater(s);t.snapshot=makeSnapshot(s);save();render();$('#sst-settings').hidden=false;toast('主线背景快照已刷新');});
-  $('#sst-rename').addEventListener('click',()=>{const t=getTheater(s),n=prompt('剧场名称',t.title);if(n){t.title=n;save();render();$('#sst-settings').hidden=false;}});
-  $('#sst-clear').addEventListener('click',()=>{const t=getTheater(s);if(confirm('清空当前剧场的番外记录？')){t.messages=[];save();render();$('#sst-settings').hidden=false;}});
-  $('#sst-delete').addEventListener('click',()=>{const t=getTheater(s);if(confirm('删除当前剧场？此操作无法撤销。')){s.theaters=s.theaters.filter(x=>x.id!==t.id);s.activeId=null;save();render();$('#sst-settings').hidden=true;}});
-  $('#sst-export').addEventListener('click',exportData);
-  $('#sst-import').addEventListener('click',()=>$('#sst-file').click());
-  $('#sst-file').addEventListener('change',importData);
-  $('#sst-generate').addEventListener('click',generate);
-  $('#sst-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();generate();}});
+function render() {
+  if(!$('#sst-v060-overlay'))return;
+  const s=settings(),t=activeTheater(s);
+  const theaterTabs=$('#sst060-theater-tabs');
+  theaterTabs.innerHTML=s.theaters.map(x=>`<button class="${x.id===t.id?'active':''}" data-theater-id="${esc(x.id)}">${esc(x.title)}</button>`).join('');
+  $$('[data-theater-id]',theaterTabs).forEach(b=>b.onclick=()=>{s.activeId=b.dataset.theaterId;save();render();});
+  $('#sst060-title').value=t.title; $('#sst060-source').textContent=t.snapshot?`只读背景：${t.snapshot.sourceLabel} · ${new Date(t.snapshot.capturedAt).toLocaleString()}`:'尚未建立背景快照';
+  $('#sst060-messages').innerHTML=t.messages.length?t.messages.map(m=>`<article class="sst060-msg ${m.role}"><b>${m.role==='user'?'你':'剧场'}</b><div>${esc(m.content).replace(/\n/g,'<br>')}</div></article>`).join(''):'<div class="sst060-empty">🌙<b>主线之外的小小宇宙</b><span>写下一个脑洞，开始独立番外。</span></div>';
+  $('#sst060-messages').scrollTop=$('#sst060-messages').scrollHeight;
+  $('#sst060-mode').value=s.generationMode; $('#sst060-api').value=s.apiChoice;
+  $('#sst060-system').value=s.systemPrompt; $('#sst060-rules').value=s.creativeRules; $('#sst060-custom').value=s.customPrompt; $('#sst060-jailbreak').value=s.jailbreakPrompt; $('#sst060-lore').value=t.loreSupplement||'';
+  $('#sst060-c-char').checked=s.captureCharacter; $('#sst060-c-persona').checked=s.capturePersona; $('#sst060-c-chat').checked=s.captureChat; $('#sst060-c-lore').checked=s.captureEmbeddedLore; $('#sst060-history').value=s.maxHistory;
+  $('#sst060-base-url').value=s.secondaryApi.baseUrl||''; $('#sst060-secondary-model').value=s.secondaryApi.model||'';
+  if(!$('#sst060-provider').value)$('#sst060-provider').value=s.apiChoice==='secondary'?'OpenAI-compatible':'SillyTavern current API';
+  renderCopySelect(); renderPromptTable(); renderRegex();
 }
-
-function bindLibrary(){
-  $('#sst-add-script').addEventListener('click',()=>{$('#sst-script-editor').hidden=false;$('#sst-script-editor').dataset.id='';$('#sst-script-title').value='';$('#sst-script-content').value='';});
-  $('#sst-cancel-script').addEventListener('click',()=>$('#sst-script-editor').hidden=true);
-  $('#sst-save-script').addEventListener('click',()=>{
-    const s=settings(),name=$('#sst-script-title').value.trim(),content=$('#sst-script-content').value.trim();
-    if(!name||!content){alert('请填写剧本名称和内容');return;}
-    const editId=$('#sst-script-editor').dataset.id;
-    if(editId){const old=s.scripts.find(x=>x.id===editId);if(old){old.name=name;old.content=content;old.updatedAt=Date.now();}}
-    else s.scripts.push({id:uuid(),name,content,createdAt:Date.now()});
-    $('#sst-script-editor').dataset.id='';save();$('#sst-script-editor').hidden=true;renderScripts();
-  });
-  $('#sst-archive-search').addEventListener('input',renderArchive);
-  $('#sst-add-regex').addEventListener('click',()=>openRegexEditor());
-  $('#sst-scan-regex').addEventListener('click',scanTavernRegex);
-  $('#sst-import-regex').addEventListener('click',()=>$('#sst-regex-file').click());
-  $('#sst-regex-file').addEventListener('change',importRegexFile);
-  $('#sst-cancel-regex').addEventListener('click',()=>$('#sst-regex-editor').hidden=true);
-  $('#sst-save-regex').addEventListener('click',()=>{
-    const s=settings(),rule={id:$('#sst-regex-editor').dataset.id||uuid(),name:$('#sst-regex-name').value.trim()||'未命名规则',
-      pattern:$('#sst-regex-pattern').value,replace:$('#sst-regex-replace').value,
-      global:$('#sst-regex-global').checked,insensitive:$('#sst-regex-insensitive').checked,enabled:$('#sst-regex-enabled').checked};
-    try{new RegExp(rule.pattern,(rule.global?'g':'')+(rule.insensitive?'i':''));}
-    catch(e){alert('正则表达式无效：'+e.message);return;}
-    const i=s.regexRules.findIndex(x=>x.id===rule.id);if(i>=0)s.regexRules[i]=rule;else s.regexRules.push(rule);
-    save();$('#sst-regex-editor').hidden=true;renderRegexRules();
-  });
-  ['sst-regex-pattern','sst-regex-replace','sst-regex-test','sst-regex-global','sst-regex-insensitive'].forEach(id=>$('#'+id).addEventListener('input',previewRegex));
-  ['sst-regex-global','sst-regex-insensitive'].forEach(id=>$('#'+id).addEventListener('change',previewRegex));
-}
-function renderScripts(){
-  const s=settings(),el=$('#sst-scripts-list');
-  el.innerHTML=s.scripts.length?s.scripts.map(x=>`<article class="sst-library-card"><strong>${esc(x.name)}</strong><p>${esc(x.content.slice(0,240))}</p><div class="sst-button-row"><button data-use-script="${esc(x.id)}">用于当前剧场</button><button data-edit-script="${esc(x.id)}">编辑</button><button data-delete-script="${esc(x.id)}">删除</button></div></article>`).join(''):'<div class="sst-empty-small">还没有保存的剧本。可以把常用脑洞、事件设定或开场词保存到这里。</div>';
-  el.querySelectorAll('[data-use-script]').forEach(b=>b.addEventListener('click',()=>{const x=s.scripts.find(a=>a.id===b.dataset.useScript);if(x){$('#sst-input').value=x.content;showPage('theater');}}));
-  el.querySelectorAll('[data-edit-script]').forEach(b=>b.addEventListener('click',()=>{const x=s.scripts.find(a=>a.id===b.dataset.editScript);if(x){$('#sst-script-editor').dataset.id=x.id;$('#sst-script-title').value=x.name;$('#sst-script-content').value=x.content;$('#sst-script-editor').hidden=false;}}));
-  el.querySelectorAll('[data-delete-script]').forEach(b=>b.addEventListener('click',()=>{if(confirm('删除这个剧本？')){s.scripts=s.scripts.filter(a=>a.id!==b.dataset.deleteScript);save();renderScripts();}}));
-}
-function renderArchive(){
-  const s=settings(),q=($('#sst-archive-search').value||'').toLowerCase();
-  const items=s.storyLibrary.filter(x=>(x.title+' '+x.content).toLowerCase().includes(q)).slice().reverse();
-  const el=$('#sst-archive-list');
-  el.innerHTML=items.length?items.map(x=>`<article class="sst-library-card"><strong>${esc(x.title)}</strong><small>${new Date(x.createdAt).toLocaleString()}</small><p>${esc(x.content.slice(0,320))}</p><div class="sst-button-row"><button data-open-story="${esc(x.id)}">阅读全文</button><button data-copy-story="${esc(x.id)}">复制</button><button data-delete-story="${esc(x.id)}">删除</button></div><div class="sst-full-story" id="sst-story-${esc(x.id)}" hidden>${esc(x.content).replace(/\\n/g,'<br>')}</div></article>`).join(''):'<div class="sst-empty-small">还没有生成记录。以后生成的番外会自动归档在这里。</div>';
-  el.querySelectorAll('[data-open-story]').forEach(b=>b.addEventListener('click',()=>{const d=$('#sst-story-'+b.dataset.openStory);d.hidden=!d.hidden;}));
-  el.querySelectorAll('[data-copy-story]').forEach(b=>b.addEventListener('click',()=>{const x=s.storyLibrary.find(a=>a.id===b.dataset.copyStory);if(x)navigator.clipboard?.writeText(x.content).then(()=>toast('已复制'));}));
-  el.querySelectorAll('[data-delete-story]').forEach(b=>b.addEventListener('click',()=>{if(confirm('删除这条番外归档？')){s.storyLibrary=s.storyLibrary.filter(a=>a.id!==b.dataset.deleteStory);save();renderArchive();}}));
-}
-function openRegexEditor(rule=null){
-  const ed=$('#sst-regex-editor');ed.hidden=false;ed.dataset.id=rule?.id||'';
-  $('#sst-regex-name').value=rule?.name||'';$('#sst-regex-pattern').value=rule?.pattern||'';
-  $('#sst-regex-replace').value=rule?.replace||'';$('#sst-regex-global').checked=rule?.global!==false;
-  $('#sst-regex-insensitive').checked=!!rule?.insensitive;$('#sst-regex-enabled').checked=rule?.enabled!==false;
-  $('#sst-regex-test').value='';$('#sst-regex-preview').value='';previewRegex();
-}
-function applyRegex(text){
-  let out=String(text);
-  for(const r of settings().regexRules){if(!r.enabled)continue;try{out=out.replace(new RegExp(r.pattern,(r.global?'g':'')+(r.insensitive?'i':'')),r.replace);}catch(e){console.warn('[Side Story] Invalid regex',r.name,e);}}
-  return out;
-}
-function previewRegex(){
-  try{
-    const flags=($('#sst-regex-global').checked?'g':'')+($('#sst-regex-insensitive').checked?'i':'');
-    const re=new RegExp($('#sst-regex-pattern').value,flags);
-    $('#sst-regex-preview').value=$('#sst-regex-test').value.replace(re,$('#sst-regex-replace').value);
-  }catch(e){$('#sst-regex-preview').value='正则错误：'+e.message;}
-}
-function renderRegexRules(){
-  const s=settings(),el=$('#sst-regex-list');
-  el.innerHTML=s.regexRules.length?s.regexRules.map(r=>`<article class="sst-library-card"><label class="sst-inline-check"><input type="checkbox" data-regex-toggle="${esc(r.id)}" ${r.enabled?'checked':''}> ${esc(r.name)}</label><small>${esc(r.source||'异想剧场自定义')} · /${esc(r.pattern)}/${r.global?'g':''}${r.insensitive?'i':''} → ${esc(r.replace)}</small><div class="sst-button-row"><button data-edit-regex="${esc(r.id)}">编辑</button><button data-delete-regex="${esc(r.id)}">删除</button></div></article>`).join(''):'<div class="sst-empty-small">还没有美化规则。</div>';
-  el.querySelectorAll('[data-regex-toggle]').forEach(b=>b.addEventListener('change',()=>{const r=s.regexRules.find(x=>x.id===b.dataset.regexToggle);if(r){r.enabled=b.checked;save();}}));
-  el.querySelectorAll('[data-edit-regex]').forEach(b=>b.addEventListener('click',()=>openRegexEditor(s.regexRules.find(x=>x.id===b.dataset.editRegex))));
-  el.querySelectorAll('[data-delete-regex]').forEach(b=>b.addEventListener('click',()=>{s.regexRules=s.regexRules.filter(x=>x.id!==b.dataset.deleteRegex);save();renderRegexRules();}));
-}
-
-function activePresetPrompt(s){
-  const preset=(s.localPresets||[]).find(x=>x.id===s.activeLocalPresetId);
-  if(!preset)return '';
-  return (preset.prompts||[]).filter(x=>x.enabled!==false && x.content).map(x=>`【导入预设：${x.name||'Prompt'}】\n${x.content}`).join('\n\n');
-}
-function renderLocalPresets(){
-  const el=$('#sst-preset-list');if(!el)return;const s=settings();
-  el.innerHTML=(s.localPresets||[]).map(p=>`<article class="sst-library-card"><label class="sst-inline-check"><input type="radio" name="sst-active-preset" data-activate-preset="${esc(p.id)}" ${s.activeLocalPresetId===p.id?'checked':''}> ${esc(p.name)}</label><small>${(p.prompts||[]).length} 个提示词条目 · 独立副本</small><div class="sst-button-row"><button data-edit-preset="${esc(p.id)}">编辑条目</button><button data-delete-preset="${esc(p.id)}">删除</button></div></article>`).join('')||'<small>尚未导入预设副本。</small>';
-  el.querySelectorAll('[data-activate-preset]').forEach(b=>b.addEventListener('change',()=>{s.activeLocalPresetId=b.dataset.activatePreset;save();toast('番外预设副本已启用');}));
-  el.querySelectorAll('[data-delete-preset]').forEach(b=>b.addEventListener('click',()=>{if(confirm('删除这份异想剧场预设副本？酒馆原预设不会受影响。')){s.localPresets=s.localPresets.filter(x=>x.id!==b.dataset.deletePreset);if(s.activeLocalPresetId===b.dataset.deletePreset)s.activeLocalPresetId=null;save();renderLocalPresets();}}));
-  el.querySelectorAll('[data-edit-preset]').forEach(b=>b.addEventListener('click',()=>editLocalPreset(s.localPresets.find(x=>x.id===b.dataset.editPreset))));
-}
-function extractPresetPrompts(data){
-  const arr=Array.isArray(data?.prompts)?data.prompts:Array.isArray(data?.entries)?data.entries:[];
-  return arr.map((p,i)=>({id:String(p.identifier||p.id||i),name:p.name||p.identifier||`提示词 ${i+1}`,role:p.role||'system',content:String(p.content??p.prompt??p.text??''),enabled:p.enabled!==false && p.injection_position!==-1})).filter(x=>x.content.trim());
-}
-async function importLocalPreset(e){
-  const f=e.target.files?.[0];if(!f)return;
-  try{const data=JSON.parse(await f.text());const prompts=extractPresetPrompts(data);if(!prompts.length)throw new Error('没有识别到 prompts/entries 提示词条目。');
-    const s=settings(),p={id:uuid(),name:data.name||f.name.replace(/\.json$/i,''),prompts,source:'import',createdAt:Date.now()};s.localPresets.push(p);s.activeLocalPresetId=p.id;const embedded=data.extensions?.regex_scripts||data.regex_scripts||[];if(Array.isArray(embedded))embedded.forEach((r,i)=>{const rule=normalizeRegexRule(r,'预设内嵌正则',i);if(rule)s.regexRules.push(rule);});save();renderLocalPresets();toast(`已导入 ${prompts.length} 个提示词条目副本`);
-  }catch(err){alert('预设导入失败：'+err.message+'。请使用酒馆导出的 Chat Completion Prompt Manager 预设 JSON。');}finally{e.target.value='';}
-}
-function saveLocalPreset(){
-  const s=settings(),name=prompt('给当前异想剧场配置起个名字');if(!name)return;
-  const prompts=[{id:'custom',name:'自定义创作提示词',role:'system',content:s.customPrompt||'',enabled:true},{id:'rules',name:'创作规则',role:'system',content:s.creativeRules||'',enabled:true},{id:'jailbreak',name:'额外创作提示词',role:'system',content:s.jailbreakPrompt||'',enabled:!!s.jailbreakPrompt}].filter(x=>x.content);
-  const p={id:uuid(),name,prompts,source:'local',createdAt:Date.now()};s.localPresets.push(p);s.activeLocalPresetId=p.id;save();renderLocalPresets();
-}
-function editLocalPreset(p){
-  if(!p)return;for(const item of p.prompts||[]){const enabled=confirm(`条目：${item.name}\n当前：${item.enabled===false?'停用':'启用'}\n点击“确定”保持/设为启用，点击“取消”停用。`);item.enabled=enabled;
-    const content=prompt(`编辑提示词内容：${item.name}`,item.content);if(content!==null)item.content=content;}
-  save();renderLocalPresets();
-}
-async function callSecondaryApi(s,system,prompt){
-  const a=s.secondaryApi||{};if(!a.baseUrl||!a.model)throw new Error('请先填写副 API 的基础 URL 和模型名称。');
-  const url=a.baseUrl.replace(/\/$/,'')+'/chat/completions';
-  const body={model:a.model,messages:[...(system?[{role:'system',content:system}]:[]),{role:'user',content:prompt}],stream:false};
-  if(a.temperature!==null&&a.temperature!==undefined)body.temperature=a.temperature;
-  if(a.maxTokens)body.max_tokens=a.maxTokens;
-  const headers={'Content-Type':'application/json'};if(a.apiKey)headers.Authorization='Bearer '+a.apiKey;
-  const response=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
-  if(!response.ok)throw new Error(`副 API 请求失败（HTTP ${response.status}）：${(await response.text()).slice(0,500)}`);
-  const data=await response.json();const content=data?.choices?.[0]?.message?.content;
-  if(typeof content==='string')return content;
-  if(Array.isArray(content))return content.map(x=>x.text||'').join('');
-  throw new Error('副 API 返回格式不是兼容 OpenAI 的 choices[0].message.content。');
-}
-function normalizeRegexRule(r,source,index){
-  const pattern=r.findRegex??r.pattern??r.regex??r.find??'';if(!pattern)return null;
-  let raw=String(pattern),flags='';const m=raw.match(/^\/(.*)\/([gimsuy]*)$/);if(m){raw=m[1];flags=m[2];}
-  return {id:uuid(),name:r.scriptName||r.name||`酒馆正则 ${index+1}`,pattern:raw,replace:String(r.replaceString??r.replace??r.replacement??''),global:flags.includes('g')||r.markdownOnly===false||r.global===true,insensitive:flags.includes('i'),enabled:r.disabled!==true&&r.enabled!==false,source};
-}
-function collectRegexArrays(root,source,out,seen=new Set(),depth=0){
-  if(!root||typeof root!=='object'||depth>6||seen.has(root))return;seen.add(root);
-  if(Array.isArray(root)){if(root.some(x=>x&&typeof x==='object'&&('findRegex'in x||'pattern'in x||'regex'in x)))root.forEach((x,i)=>{const n=normalizeRegexRule(x,source,i);if(n)out.push(n);});else root.forEach(x=>collectRegexArrays(x,source,out,seen,depth+1));return;}
-  for(const [k,v] of Object.entries(root)){if(/regex/i.test(k))collectRegexArrays(v,source,out,seen,depth+1);}
-}
-function scanTavernRegex(){
-  const c=ctx(),out=[];const globalCandidates=[window.extension_settings?.regex,window.extension_settings?.regex_scripts,c?.extensionSettings?.regex,c?.extensionSettings?.regex_scripts,window.power_user?.regex_scripts];
-  globalCandidates.forEach(x=>collectRegexArrays(x,'酒馆全局',out));
-  const localCandidates=[c?.chatMetadata?.regex_scripts,c?.chatMetadata?.extensions?.regex_scripts,c?.chatMetadata?.regex,c?.chatMetadata?.extensions?.regex];
-  localCandidates.forEach(x=>collectRegexArrays(x,'当前聊天',out));
-  const s=settings(),known=new Set(s.regexRules.map(x=>x.name+'|'+x.pattern+'|'+x.source));let added=0;
-  out.forEach(x=>{const k=x.name+'|'+x.pattern+'|'+x.source;if(!known.has(k)){s.regexRules.push(x);known.add(k);added++;}});
-  save();renderRegexRules();toast(added?`扫描完成，复制 ${added} 条规则；未改动酒馆原规则。`:'没有发现新的可识别正则。可导出酒馆正则 JSON 后手动导入。');
-}
-async function importRegexFile(e){
-  const f=e.target.files?.[0];if(!f)return;
-  try{const data=JSON.parse(await f.text()),list=Array.isArray(data)?data:(data.regex_scripts||data.scripts||data.regexScripts||[]);if(!Array.isArray(list))throw new Error('文件中没有识别到正则数组');
-    const s=settings();list.forEach((r,i)=>{const n=normalizeRegexRule(r,'导入文件',i);if(n)s.regexRules.push(n);});save();renderRegexRules();toast('正则规则已复制到异想剧场');
-  }catch(err){alert('正则导入失败：'+err.message);}finally{e.target.value='';}
-}
-
-function toast(message){
-  if(window.toastr?.info) window.toastr.info(message);
-  else console.info('[Side Story]',message);
-}
-function render(){
-  if(!$('#sst-overlay')) return;
-  const s=settings(),t=getTheater(s);
-  $('#sst-tabs').innerHTML=s.theaters.map(x=>`<button class="sst-tab ${x.id===t.id?'active':''}" data-id="${esc(x.id)}">${esc(x.title)}</button>`).join('');
-  $('#sst-tabs').querySelectorAll('[data-id]').forEach(b=>b.addEventListener('click',()=>{s.activeId=b.dataset.id;save();render();}));
-  $('#sst-title').value=t.title;
-  $('#sst-title').onchange=e=>{t.title=e.target.value;save();render();};
-  $('#sst-source').textContent=t.snapshot?`背景快照：${t.snapshot.sourceLabel} · ${new Date(t.snapshot.capturedAt).toLocaleString()}`:'尚未建立主线背景快照';
-  $('#sst-messages').innerHTML=t.messages.length?t.messages.map(m=>`<article class="sst-msg ${m.role}"><div class="sst-role">${m.role==='user'?'你':'剧场'}</div><div class="sst-text">${esc(m.content).replace(/\n/g,'<br>')}</div></article>`).join(''):'<div class="sst-empty"><div>🌙</div><strong>这里是主线之外的小小宇宙</strong><span>写下一个脑洞，开启独立番外。</span></div>';
-  $('#sst-messages').scrollTop=$('#sst-messages').scrollHeight;
-  $('#sst-generation-mode').value=s.generationMode||'quiet';
-  $('#sst-api-choice').value=s.apiChoice||'primary';
-  $('#sst-system').value=s.systemPrompt;$('#sst-rules').value=s.creativeRules;$('#sst-jailbreak').value=s.jailbreakPrompt;$('#sst-custom-prompt').value=s.customPrompt||'';
-  $('#sst-lore').value=t.loreSupplement||'';
-  $('#sst-capture-character').checked=s.captureCharacter;$('#sst-capture-persona').checked=s.capturePersona;
-  $('#sst-capture-chat').checked=s.captureChat;$('#sst-capture-lore').checked=s.captureEmbeddedLore;
-  $('#sst-max-history').value=s.maxHistory;
-}
-async function generate(){
-  const s=settings(),t=getTheater(s),input=$('#sst-input').value.trim();
-  if(!input)return;
-  const c=ctx(),mode=$('#sst-generation-mode').value;
-  const button=$('#sst-generate');button.disabled=true;button.textContent='正在生成…';
-  try{
-    if(!t.snapshot)t.snapshot=makeSnapshot(s);
+async function generate() {
+  const s=settings(),t=activeTheater(s),input=$('#sst060-input').value.trim(); if(!input)return;
+  const button=$('#sst060-generate');button.disabled=true;button.textContent='正在生成…';
+  try {
+    if(!t.snapshot)t.snapshot=snapshot(s);
     const previous=t.messages.slice(-s.maxTheaterTurns).map(m=>`${m.role==='user'?'用户':'剧场'}：${m.content}`).join('\n\n');
-    const system=[s.systemPrompt,s.creativeRules,s.customPrompt,s.jailbreakPrompt,activePresetPrompt(s)].filter(Boolean).join('\n\n');
-    const prompt=[
-      '【独立番外背景快照】\n'+(t.snapshot.text||'未提供主线背景'),
-      '【本剧场补充世界书与设定】\n'+(t.loreSupplement||'无'),
-      '【本剧场此前对话】\n'+(previous||'这是本剧场的第一轮'),
-      '【用户本轮要求】\n'+input,
-      '请只在本番外空间内延续，不要声称这些事件已经发生在主线。'
-    ].join('\n\n');
+    const system=[s.systemPrompt,s.creativeRules,s.customPrompt,s.jailbreakPrompt,activePresetText(s)].filter(Boolean).join('\n\n');
+    const prompt=[`【独立番外背景快照】\n${t.snapshot.text||'未提供'}`,`【补充世界书】\n${t.loreSupplement||'无'}`,`【本剧场历史】\n${previous||'第一轮'}`,`【本轮要求】\n${input}`,'只在本番外空间内续写；不要声称事件已发生在主线。'].join('\n\n');
     let result;
-    if((s.apiChoice||'primary')==='secondary'){
-      result=await callSecondaryApi(s,system,prompt);
-    }else if(mode==='quiet'){
-      if(typeof c.generateQuietPrompt!=='function')throw new Error('当前酒馆未提供 generateQuietPrompt()。');
-      result=await c.generateQuietPrompt({quietPrompt:[system,prompt].filter(Boolean).join('\n\n')});
-    }else{
-      if(typeof c.generateRaw!=='function')throw new Error('当前酒馆未提供 generateRaw()。');
-      result=await c.generateRaw({systemPrompt:system,prompt});
+    if(s.apiChoice==='secondary') result=await callSecondary(s,system,prompt);
+    else {
+      const c=ctx();
+      if($('#sst060-mode').value==='quiet') {
+        if(typeof c.generateQuietPrompt!=='function')throw new Error('当前酒馆上下文没有公开 generateQuietPrompt()；请升级酒馆或切换 Raw 模式。');
+        result=await c.generateQuietPrompt({quietPrompt:[system,prompt].filter(Boolean).join('\n\n')});
+      } else {
+        if(typeof c.generateRaw!=='function')throw new Error('当前酒馆上下文没有公开 generateRaw()。');
+        result=await c.generateRaw({systemPrompt:system,prompt});
+      }
     }
-    if(!result)throw new Error('模型没有返回内容，请检查 API 连接与中转配置。');
-    const raw=String(result),beautified=applyRegex(raw);
-    t.messages.push({role:'user',content:input,time:Date.now()},{role:'assistant',content:beautified,rawContent:raw,time:Date.now()});
-    s.storyLibrary.push({id:uuid(),title:(input.length>36?input.slice(0,36)+'…':input),content:beautified,rawContent:raw,theaterId:t.id,createdAt:Date.now()});
-    $('#sst-input').value='';save();render();
-  }catch(err){console.error('[Side Story]',err);alert('生成失败：'+(err?.message||err));}
-  finally{button.disabled=false;button.textContent='生成剧场 ✦';}
+    if(!result)throw new Error('模型没有返回文本。');
+    const raw=String(result),content=applyRegex(raw);
+    t.messages.push({role:'user',content:input,time:Date.now()},{role:'assistant',content,rawContent:raw,time:Date.now()});
+    s.storyLibrary.push({id:uid(),title:input.length>36?input.slice(0,36)+'…':input,content,rawContent:raw,theaterId:t.id,createdAt:Date.now()});
+    $('#sst060-input').value='';save();render();
+  } catch(e) { console.error('[异想剧场]',e); alert('生成失败：'+(e?.message||e)); }
+  finally {button.disabled=false;button.textContent='生成番外 ✦';}
 }
-function exportData(){
-  const s=settings(),blob=new Blob([JSON.stringify({version:'0.5.0',theaters:s.theaters,scripts:s.scripts,storyLibrary:s.storyLibrary,regexRules:s.regexRules,localPresets:s.localPresets,customPrompt:s.customPrompt,apiChoice:s.apiChoice},null,2)],{type:'application/json'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='side-story-backup.json';a.click();URL.revokeObjectURL(a.href);
+function activePresetText(s) { const p=s.localPresets.find(x=>x.id===s.activeLocalPresetId);return (p?.prompts||[]).filter(x=>x.enabled!==false&&x.content).map(x=>`【副本提示词：${x.name}】\n${x.content}`).join('\n\n'); }
+
+// Native preset discovery uses PresetManager read methods only. It never calls select/save/update/delete.
+function getNativePresetObjects() {
+  const c=ctx(),pm=c?.getPresetManager?.(); if(!pm)return {pm,rows:[],error:'当前酒馆没有暴露 getPresetManager()。'};
+  const names=[]; try { if(typeof pm.getAllPresets==='function') names.push(...pm.getAllPresets()); } catch {}
+  let list=null; try { list=pm.getPresetList?.(); } catch {}
+  if(!names.length && list) {
+    const obj=list.preset_names||list.presets||{};
+    if(Array.isArray(obj)) names.push(...obj.map(x=>typeof x==='string'?x:x.name).filter(Boolean));
+    else names.push(...Object.keys(obj));
+  }
+  const uniq=[...new Set(names.map(String))];
+  const rows=[];
+  for(const name of uniq) {
+    let data; try { data=pm.getCompletionPresetByName?.(name); } catch {}
+    // findPreset() returns the select option value, not the preset payload; never treat it as settings.
+    if(!data && list?.presets) data=Array.isArray(list.presets)?list.presets.find(x=>x.name===name):list.presets[name];
+    if(data) rows.push({name,data});
+  }
+  return {pm,rows,error:rows.length?'':'未找到可读取的原生预设条目；可以手动导入 JSON。'};
 }
-async function importData(e){
+function getPromptArray(data) {
+  const a=Array.isArray(data?.prompts)?data.prompts:Array.isArray(data?.entries)?data.entries:[];
+  return a.map((p,i)=>({id:String(p.identifier||p.id||i),name:p.name||p.identifier||`提示词 ${i+1}`,role:p.role||p.role_type||'system',content:String(p.content??p.prompt??p.text??''),enabled:p.enabled!==false&&p.injection_position!==-1,sourceEnabled:p.enabled!==false}));
+}
+function scanNativePresets() {
+  const found=getNativePresetObjects();nativePresetRows=found.rows.map(r=>({name:r.name,count:getPromptArray(r.data).length,data:r.data}));
+  renderNativePresets();toast(nativePresetRows.length?`发现 ${nativePresetRows.length} 个可读取原生预设；原文件保持只读。`:found.error);
+}
+function renderNativePresets() {
+  const el=$('#sst060-native-presets');if(!el)return;
+  const rows=nativePresetRows.filter(r=>(r.name+' '+JSON.stringify(r.data)).toLowerCase().includes(presetSearch));
+  el.innerHTML=rows.length?rows.map((r,i)=>`<article class="sst060-list-item"><div><b>${esc(r.name)}</b><small>${r.count} 条可识别提示词 · 原生只读</small></div><button data-copy-native="${i}">建立可编辑副本</button></article>`).join(''):'<p class="sst060-note">尚未扫描，或没有匹配结果。</p>';
+  $$('[data-copy-native]',el).forEach(b=>b.onclick=()=>{const r=rows[Number(b.dataset.copyNative)];if(!r)return;const prompts=getPromptArray(r.data);if(!prompts.length){toast('该预设结构暂未识别为提示词列表，原生文件未改动。');return;}const s=settings();const copy={id:uid(),name:r.name+'（剧场副本）',source:'native-copy',sourceName:r.name,createdAt:Date.now(),prompts};s.localPresets.push(copy);s.activeLocalPresetId=copy.id;save();renderCopySelect();renderPromptTable();toast('副本已建立；原生预设未修改。');});
+}
+function renderCopySelect() {
+  const el=$('#sst060-copy-select');if(!el)return;const s=settings();const old=el.value;
+  el.innerHTML='<option value="">选择预设副本</option>'+s.localPresets.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  el.value=s.localPresets.some(p=>p.id===old)?old:(s.activeLocalPresetId||'');
+}
+function selectedCopy() { const s=settings();return s.localPresets.find(p=>p.id===$('#sst060-copy-select').value)||s.localPresets.find(p=>p.id===s.activeLocalPresetId)||null; }
+function renderPromptTable() {
+  const el=$('#sst060-prompt-rows');if(!el)return;const p=selectedCopy();
+  if(!p){el.innerHTML='<tr><td colspan="4">先扫描原生预设并建立副本，或手动导入 JSON。</td></tr>';return;}
+  el.innerHTML=(p.prompts||[]).map((x,i)=>`<tr data-prompt-row="${i}"><td><input type="checkbox" data-prompt-select="${i}"></td><td><input type="checkbox" data-prompt-enabled="${i}" ${x.enabled!==false?'checked':''}></td><td><input data-prompt-name="${i}" value="${esc(x.name)}"><small>${esc(x.role)}</small></td><td><textarea data-prompt-content="${i}" rows="3">${esc(x.content)}</textarea></td></tr>`).join('')||'<tr><td colspan="4">这个副本没有识别到提示词条目。</td></tr>';
+  $('#sst060-copy-select').value=p.id;
+  filterPromptRows();
+}
+function filterPromptRows() {
+  const q=($('#sst060-prompt-filter')?.value||'').toLowerCase();
+  $$('[data-prompt-row]').forEach(row=>{row.hidden=!row.textContent.toLowerCase().includes(q);});
+}
+function batchPromptEnabled(value) {
+  const p=selectedCopy();if(!p)return;const idx=$$('[data-prompt-select]:checked').map(x=>Number(x.dataset.promptSelect));
+  if(!idx.length){toast('先勾选要批量处理的行。');return;}
+  idx.forEach(i=>{if(p.prompts[i])p.prompts[i].enabled=value;});renderPromptTable();
+}
+function savePromptTable() {
+  const p=selectedCopy();if(!p)return;
+  p.prompts.forEach((x,i)=>{const e=$(`[data-prompt-enabled="${i}"]`),n=$(`[data-prompt-name="${i}"]`),c=$(`[data-prompt-content="${i}"]`);if(e)x.enabled=e.checked;if(n)x.name=n.value;if(c)x.content=c.value;});
+  const s=settings();s.activeLocalPresetId=p.id;save();toast('副本所有修改已保存。');
+}
+async function importPresetFile(e) {
   const f=e.target.files?.[0];if(!f)return;
-  try{const data=JSON.parse(await f.text()),s=settings();if(Array.isArray(data.theaters))s.theaters=data.theaters;if(Array.isArray(data.scripts))s.scripts=data.scripts;if(Array.isArray(data.storyLibrary))s.storyLibrary=data.storyLibrary;if(Array.isArray(data.regexRules))s.regexRules=data.regexRules;if(Array.isArray(data.localPresets))s.localPresets=data.localPresets;if(typeof data.customPrompt==='string')s.customPrompt=data.customPrompt;s.activeId=null;save();render();toast('剧场数据导入成功');}
-  catch(err){alert('导入失败：文件格式不正确。');}
-  e.target.value='';
+  try {const data=JSON.parse(await f.text()),prompts=getPromptArray(data);if(!prompts.length)throw new Error('未识别到 prompts / entries 列表');const s=settings();const p={id:uid(),name:data.name||f.name.replace(/\.json$/i,'')+'（剧场副本）',source:'manual-import',createdAt:Date.now(),prompts};s.localPresets.push(p);s.activeLocalPresetId=p.id;save();renderCopySelect();renderPromptTable();toast(`已导入 ${prompts.length} 条提示词副本。`);}catch(err){alert('导入失败：'+err.message);}finally{e.target.value='';}
 }
-function init(){
-  if(!window.SillyTavern?.getContext){console.warn('[Side Story] SillyTavern context not ready');return;}
-  settings();ensureUI();
-  const c=ctx();
-  c.eventSource?.on?.('APP_READY',ensureUI);
-  console.log('[Side Story] v0.4.0 loaded');
+
+function profileKey(provider,model) { return `${String(provider||'unknown').trim().toLowerCase()}::${String(model||'unknown').trim()}`; }
+const PARAMS = [
+  ['temperature','Temperature','数值，例如 0.8','number'],['maxOutputTokens','Max Response Tokens','最大输出 token 数','number'],['contextLength','Context Length','上下文长度（仅保存，不向通用接口盲发）','number'],['topP','Top P','例如 0.95','number'],['repetitionPenalty','Repetition Penalty','例如 1.05','number'],['reasoningEffort','Reasoning Effort','low / medium / high','text'],['thinkingBudget','Thinking Budget','思考预算 token 数','number']
+];
+function activeModelIdentity() {
+  const c=ctx(),s=settings();
+  if(s.apiChoice==='secondary')return {provider:'openai-compatible:'+String(s.secondaryApi.baseUrl||'').replace(/\/$/,''),model:s.secondaryApi.model||''};
+  let provider=c?.mainApi||c?.api||c?.chatCompletionSource||'SillyTavern current API';
+  let model='';try{model=c?.getChatCompletionModel?.()||c?.chatCompletionModel||c?.model||'';}catch{}
+  return {provider:String(provider),model:String(model)};
+}
+function refreshModelIdentity() {
+  const ident=activeModelIdentity();$('#sst060-provider').value=ident.provider;$('#sst060-model-id').value=ident.model;loadProfile();
+}
+function renderProfileFields() {
+  const el=$('#sst060-profile-fields');if(!el)return;
+  el.innerHTML=PARAMS.map(([k,label,help,type])=>`<div class="sst060-param"><label><input type="checkbox" data-param-supported="${k}"> 该模型确认支持</label><b>${label}</b><input type="${type}" data-param-value="${k}" placeholder="${esc(help)}"><small>${esc(help)}</small></div>`).join('');
+  const ident=activeModelIdentity();$('#sst060-provider').value=ident.provider;$('#sst060-model-id').value=ident.model;
+  loadProfile();
+}
+function getCurrentProfile() {
+  const provider=$('#sst060-provider').value.trim(),model=$('#sst060-model-id').value.trim();if(!provider||!model)throw new Error('请填写 Provider/API 类型和准确 Model ID。');
+  return {key:profileKey(provider,model),provider,model};
+}
+function loadProfile() {
+  try {const id=getCurrentProfile(),p=settings().modelProfiles[id.key]||{};
+    PARAMS.forEach(([k])=>{const v=$(`[data-param-value="${k}"]`),c=$(`[data-param-supported="${k}"]`);if(v)v.value=p.values?.[k]??'';if(c)c.checked=!!p.supported?.[k];});
+    if($('#sst060-max-token-field'))$('#sst060-max-token-field').value=p.maxTokenField||'max_tokens';
+    $('#sst060-profile-note').textContent=p.updatedAt?`已载入：${id.provider} / ${id.model} · ${new Date(p.updatedAt).toLocaleString()}`:'首次使用此模型：尚无经验证的能力档案，参数默认留空且不擅自猜测。';
+  }catch(e){$('#sst060-profile-note').textContent=e.message;}
+}
+function saveProfile() {
+  try {const id=getCurrentProfile(),values={},supported={};PARAMS.forEach(([k])=>{values[k]=$(`[data-param-value="${k}"]`).value;supported[k]=$(`[data-param-supported="${k}"]`).checked;});settings().modelProfiles[id.key]={provider:id.provider,model:id.model,values,supported,maxTokenField:$('#sst060-max-token-field')?.value||'max_tokens',updatedAt:Date.now()};save();loadProfile();toast('该模型的参数档案已保存。');}catch(e){alert(e.message);}
+}
+function resetProfile() { try {const id=getCurrentProfile();delete settings().modelProfiles[id.key];save();loadProfile();toast('已清空此模型档案。');}catch(e){alert(e.message);} }
+async function fetchModels() {
+  const url=$('#sst060-base-url').value.trim().replace(/\/$/,'');if(!url){alert('请先填写基础 URL。');return;}
+  const key=$('#sst060-api-key').value.trim()||secondaryKeySession;
+  try {const res=await fetch(url+'/models',{headers:key?{Authorization:'Bearer '+key}:{}});if(!res.ok)throw new Error(`HTTP ${res.status}`);const data=await res.json();const items=(data.data||data.models||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean);const sel=$('#sst060-model-list');sel.innerHTML='<option value="">选择模型（也可手动输入）</option>'+items.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');toast(`读取到 ${items.length} 个模型 ID。`);}catch(e){alert('读取 /models 失败：'+e.message+'。可手动填写模型 ID。');}
+}
+function saveSecondarySettings() {
+  const s=settings();s.secondaryApi={baseUrl:$('#sst060-base-url').value.trim().replace(/\/$/,''),model:$('#sst060-secondary-model').value.trim()};
+  if($('#sst060-api-key').value.trim())secondaryKeySession=$('#sst060-api-key').value.trim();
+  $('#sst060-api-key').value='';save();refreshModelIdentity();toast('副 API 地址与模型已保存；密钥仅保留在当前页面会话内。');
+}
+async function callSecondary(s,system,prompt) {
+  const a=s.secondaryApi;if(!a.baseUrl||!a.model)throw new Error('请先设置副 API 基础 URL 和模型 ID。');
+  const url=a.baseUrl.replace(/\/$/,'')+'/chat/completions';const headers={'Content-Type':'application/json'};if(secondaryKeySession)headers.Authorization='Bearer '+secondaryKeySession;
+  const id=profileKey('openai-compatible:'+a.baseUrl,a.model),profile=s.modelProfiles[id]||{},body={model:a.model,messages:[...(system?[{role:'system',content:system}]:[]),{role:'user',content:prompt}],stream:false};
+  const values=profile.values||{},supported=profile.supported||{};
+  const map={temperature:'temperature',maxOutputTokens:profile.maxTokenField||'max_tokens',topP:'top_p',repetitionPenalty:'repetition_penalty',reasoningEffort:'reasoning_effort',thinkingBudget:'thinking_budget'};
+  for(const [k,param] of Object.entries(map))if(supported[k]&&values[k]!==''&&values[k]!==undefined&&values[k]!==null){const num=Number(values[k]);body[param]=k==='reasoningEffort'?String(values[k]):(Number.isFinite(num)?num:values[k]);}
+  const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});if(!res.ok)throw new Error(`副 API HTTP ${res.status}：${(await res.text()).slice(0,350)}`);
+  const data=await res.json(),content=data?.choices?.[0]?.message?.content;if(typeof content==='string')return content;if(Array.isArray(content))return content.map(x=>x.text||'').join('');throw new Error('返回内容不是兼容 OpenAI 的 choices[0].message.content。');
+}
+
+function normRegex(r,source,index) {
+  if(!r||typeof r!=='object')return null;let raw=String(r.findRegex??r.pattern??r.regex??'');if(!raw)return null;let flags='';const m=raw.match(/^\/(.*)\/([gimsuy]*)$/);if(m){raw=m[1];flags=m[2];}
+  return {id:uid(),name:r.scriptName||r.name||`规则 ${index+1}`,pattern:raw,replace:String(r.replaceString??r.replace??r.replacement??''),flags:flags||((r.markdownOnly===false)?'g':''),enabled:r.disabled!==true&&r.enabled!==false,source};
+}
+function collectRegex(root,source,out,depth=0,seen=new Set()) {
+  if(!root||typeof root!=='object'||depth>5||seen.has(root))return;seen.add(root);
+  if(Array.isArray(root)){root.forEach((x,i)=>{if(x&&typeof x==='object'&&(x.findRegex||x.pattern||x.regex)){const n=normRegex(x,source,i);if(n)out.push(n);}else collectRegex(x,source,out,depth+1,seen);});return;}
+  for(const [k,v] of Object.entries(root))if(/regex/i.test(k))collectRegex(v,source,out,depth+1,seen);
+}
+function scanRegex() {
+  const c=ctx(),s=settings(),out=[];
+  // Documented storage scopes: global extension_settings.regex and character.data.extensions.regex_scripts.
+  collectRegex(window.extension_settings?.regex,'酒馆全局',out);
+  collectRegex(c?.extensionSettings?.regex,'酒馆全局',out);
+  const card=characterData(c);collectRegex(card?.raw?.data?.extensions?.regex_scripts,'当前角色卡',out);
+  const seen=new Set(s.regexRules.map(x=>`${x.source}|${x.name}|${x.pattern}`));let added=0;
+  out.forEach(x=>{const k=`${x.source}|${x.name}|${x.pattern}`;if(!seen.has(k)){s.regexRules.push(x);seen.add(k);added++;}});save();renderRegex();toast(`扫描完成：复制 ${added} 条规则；原始酒馆规则未修改。`);
+}
+function applyRegex(text) { let out=String(text);for(const r of settings().regexRules){if(!r.enabled)continue;try{out=out.replace(new RegExp(r.pattern,r.flags||''),r.replace);}catch(e){console.warn('[异想剧场] regex invalid',r.name,e);}}return out; }
+async function importRegex(e) { const f=e.target.files?.[0];if(!f)return;try{const d=JSON.parse(await f.text()),a=Array.isArray(d)?d:(d.regex_scripts||d.scripts||[]);a.forEach((r,i)=>{const n=normRegex(r,'导入文件',i);if(n)settings().regexRules.push(n);});save();renderRegex();toast('规则已导入为剧场副本。');}catch(err){alert('导入失败：'+err.message);}finally{e.target.value='';} }
+function renderRegex() {
+  const el=$('#sst060-regex-list');if(!el)return;const s=settings();
+  el.innerHTML=s.regexRules.map((r,i)=>`<article class="sst060-list-item"><label><input type="checkbox" data-regex-enabled="${i}" ${r.enabled?'checked':''}> ${esc(r.name)}</label><small>${esc(r.source)} · /${esc(r.pattern)}/${esc(r.flags||'')}</small><div class="sst060-row"><input data-regex-replace="${i}" value="${esc(r.replace)}"><button data-regex-delete="${i}">删除</button></div></article>`).join('')||'<p class="sst060-note">还没有独立正则副本。</p>';
+  $$('[data-regex-enabled]',el).forEach(x=>x.onchange=()=>{s.regexRules[Number(x.dataset.regexEnabled)].enabled=x.checked;save();});
+  $$('[data-regex-replace]',el).forEach(x=>x.onchange=()=>{s.regexRules[Number(x.dataset.regexReplace)].replace=x.value;save();});
+  $$('[data-regex-delete]',el).forEach(x=>x.onclick=()=>{s.regexRules.splice(Number(x.dataset.regexDelete),1);save();renderRegex();});
+}
+
+function visibleScriptNames() {
+  const nodes=$$('[data-script-name], [data-name], .script_management, .script-manager-list, .script-card, .list-group-item');
+  return nodes.map(n=>({text:(n.getAttribute('data-script-name')||n.getAttribute('data-name')||n.textContent||'').trim().replace(/\s+/g,' ').slice(0,180)})).filter(x=>x.text);
+}
+function scanCompatibility() {
+  const texts=visibleScriptNames().map(x=>x.text.toLowerCase()).join('\n');
+  const known=[
+    {id:'kemini-router',name:'Kemini 防路由脚本',terms:['防路由','anti-routing','anti routing'],risk:'可能拦截 fetch / XMLHttpRequest，影响副 API 请求或模型路由识别。',status:'待验证'},
+    {id:'snow-melt-v2',name:'Kemini「雪融雪降 v2」预设伴随脚本',terms:['雪融雪降','dramatron'],risk:'提示词防截断与请求改写可能改变最终请求；与其它网络拦截脚本叠加时需单独验证。',status:'待验证'}
+  ];
+  compatScan=known.map(x=>{const hit=x.terms.some(t=>texts.includes(t));return {...x,detected:hit,status:hit?'已检测到名称，行为待验证':'未能从当前可见界面确认安装'};});
+  renderCompatibility();
+}
+function addCompatNote() { const name=prompt('脚本名称（仅记录名称，不读取或执行代码）');if(!name)return;const note=prompt('兼容性备注（例如模型路由 / 请求拦截 / 防截断）')||'';settings().compatibilityNotes.push({name,note,createdAt:Date.now(),status:'待验证'});save();renderCompatibility(); }
+function renderCompatibility() {
+  const el=$('#sst060-compat-list');if(!el)return;
+  const rows=compatScan.length?compatScan:[{name:'尚未执行扫描',status:'待扫描',risk:'点击“扫描已安装脚本”。脚本名称若未暴露在页面 DOM 中，扫描结果会标明无法确认。'}];
+  el.innerHTML=rows.map(x=>`<article class="sst060-list-item"><b>${esc(x.name)}</b><small>${esc(x.status)}</small><p>${esc(x.risk)}</p></article>`).join('')+settings().compatibilityNotes.map(x=>`<article class="sst060-list-item"><b>${esc(x.name)}</b><small>人工备注 · ${esc(x.status)}</small><p>${esc(x.note)}</p></article>`).join('');
+}
+function saveScript() {
+  const name=$('#sst060-script-name').value.trim(),content=$('#sst060-script-content').value.trim();
+  if(!name||!content){alert('请填写剧本名称和内容。');return;}
+  settings().scripts.push({id:uid(),name,content,createdAt:Date.now()});save();
+  $('#sst060-script-name').value='';$('#sst060-script-content').value='';renderScripts();toast('剧本已保存。');
+}
+function renderScripts() {
+  const el=$('#sst060-script-list');if(!el)return;const s=settings();
+  el.innerHTML=s.scripts.map(x=>`<article class="sst060-list-item"><b>${esc(x.name)}</b><p>${esc(x.content.slice(0,360))}</p><div class="sst060-row"><button data-script-use="${esc(x.id)}">填入当前番外</button><button data-script-delete="${esc(x.id)}">删除</button></div></article>`).join('')||'<p class="sst060-note">还没有保存的剧本。</p>';
+  $$('[data-script-use]',el).forEach(b=>b.onclick=()=>{const x=s.scripts.find(y=>y.id===b.dataset.scriptUse);if(x){$('#sst060-input').value=x.content;showPage('story');}});
+  $$('[data-script-delete]',el).forEach(b=>b.onclick=()=>{if(confirm('删除这个剧本？')){s.scripts=s.scripts.filter(x=>x.id!==b.dataset.scriptDelete);save();renderScripts();}});
+}
+function deleteActiveTheater() {
+  const s=settings(),t=activeTheater(s);if(!confirm(`删除剧场“${t.title}”？已经单独归档的番外仍会保留。`))return;
+  s.theaters=s.theaters.filter(x=>x.id!==t.id);s.activeId=s.theaters[0]?.id||null;save();render();toast('当前剧场已删除。');
+}
+function renderArchive() {
+  const el=$('#sst060-archive-list');if(!el)return;const s=settings(),q=($('#sst060-archive-search').value||'').toLowerCase();const arr=s.storyLibrary.filter(x=>(x.title+' '+x.content).toLowerCase().includes(q)).slice().reverse();
+  el.innerHTML=arr.map(x=>`<article class="sst060-list-item"><b>${esc(x.title)}</b><small>${new Date(x.createdAt).toLocaleString()}</small><p>${esc(x.content.slice(0,360))}</p><details><summary>阅读全文</summary><pre>${esc(x.content)}</pre></details><button data-archive-delete="${esc(x.id)}">删除归档</button></article>`).join('')||'<p class="sst060-note">还没有番外归档。</p>';
+  $$('[data-archive-delete]',el).forEach(b=>b.onclick=()=>{if(confirm('删除这条归档？')){s.storyLibrary=s.storyLibrary.filter(x=>x.id!==b.dataset.archiveDelete);save();renderArchive();}});
+}
+function exportData() {
+  const s=settings(),t={version:VERSION,theaters:s.theaters,scripts:s.scripts,storyLibrary:s.storyLibrary,regexRules:s.regexRules,localPresets:s.localPresets,modelProfiles:s.modelProfiles,compatibilityNotes:s.compatibilityNotes};
+  const url=URL.createObjectURL(new Blob([JSON.stringify(t,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='side-story-theater-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function importData(e) {const f=e.target.files?.[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=settings();for(const k of ['theaters','scripts','storyLibrary','regexRules','localPresets','modelProfiles','compatibilityNotes'])if(Array.isArray(d[k])|| (k==='modelProfiles'&&d[k]&&typeof d[k]==='object'))s[k]=d[k];s.activeId=null;save();render();toast('资料导入完成。');}catch(err){alert('导入失败：'+err.message);}finally{e.target.value='';}}
+
+function init() {
+  if(!ctx()){console.warn('[异想剧场] 等待 SillyTavern 上下文');return;}
+  settings();mount();
+  ctx()?.eventSource?.on?.('APP_READY',mount);
+  console.info(`[异想剧场] v${VERSION} loaded`);
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
