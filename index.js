@@ -2,7 +2,7 @@
 'use strict';
 
 const KEY = 'side_story_theater';
-const VERSION = '0.6.1';
+const VERSION = '0.6.2';
 let secondaryKeySession = '';
 let nativePresetRows = [];
 let presetSearch = '';
@@ -91,8 +91,28 @@ function ensureStyles() {
   document.head.append(style);
 }
 
+function ensureMagicWandEntry() {
+  // SillyTavern's Extensions dropdown is the content opened by the chat-input magic wand.
+  // Add a normal dropdown item there; do not inject anything into the top toolbar.
+  const menu = document.querySelector('#extensionsMenu');
+  if (!menu || document.getElementById('sst060-wand-entry')) return;
+  const item = document.createElement('div');
+  item.id = 'sst060-wand-entry';
+  item.className = 'list-group-item';
+  item.setAttribute('role', 'button');
+  item.tabIndex = 0;
+  item.innerHTML = '<i class="fa-solid fa-masks-theater"></i><span>异想剧场</span>';
+  item.title = '打开异想剧场';
+  item.addEventListener('click', open);
+  item.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+  menu.append(item);
+}
+
 function mount() {
   ensureStyles();
+  ensureMagicWandEntry();
   if ($('#sst-v060-overlay')) return;
   const root = document.createElement('div'); root.id='sst-v060-overlay'; root.setAttribute('aria-hidden','true');
   root.innerHTML = `
@@ -431,11 +451,51 @@ function exportData() {
 }
 async function importData(e) {const f=e.target.files?.[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=settings();for(const k of ['theaters','scripts','storyLibrary','regexRules','localPresets','modelProfiles','compatibilityNotes'])if(Array.isArray(d[k])|| (k==='modelProfiles'&&d[k]&&typeof d[k]==='object'))s[k]=d[k];s.activeId=null;save();render();toast('资料导入完成。');}catch(err){alert('导入失败：'+err.message);}finally{e.target.value='';}}
 
+let initialized = false;
+let readyListenerBound = false;
+let initObserver = null;
+
 function init() {
-  if(!ctx()){console.warn('[异想剧场] 等待 SillyTavern 上下文');return;}
-  settings();mount();
-  ctx()?.eventSource?.on?.('APP_READY',mount);
-  console.info(`[异想剧场] v${VERSION} loaded`);
+  const c = ctx();
+  if (!c) {
+    console.warn('[异想剧场] SillyTavern 上下文尚未就绪，等待界面初始化');
+    if (!initObserver && document.body) {
+      initObserver = new MutationObserver(() => {
+        if (ctx()) {
+          initObserver.disconnect();
+          initObserver = null;
+          init();
+        }
+      });
+      initObserver.observe(document.body, { childList: true, subtree: true });
+    }
+    return;
+  }
+
+  try {
+    settings();
+    mount();
+    if (!readyListenerBound && c.eventSource?.on) {
+      c.eventSource.on('APP_READY', () => {
+        mount();
+        ensureMagicWandEntry();
+      });
+      readyListenerBound = true;
+    }
+    if (!initialized) {
+      initialized = true;
+      console.info(`[异想剧场] v${VERSION} loaded`);
+    }
+  } catch (error) {
+    console.error('[异想剧场] 初始化失败', error);
+  }
 }
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init, { once: true });
+} else {
+  init();
+}
+// A second safe attempt handles cases where the extension script loads before Tavern's UI.
+window.addEventListener('load', init, { once: true });
 })();
